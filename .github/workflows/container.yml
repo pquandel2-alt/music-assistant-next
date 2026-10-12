@@ -1,0 +1,80 @@
+name: Container
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile.next"
+      - "frontend/**"
+      - "server/**"
+      - "music_assistant_next/**"
+      - "repository.json"
+      - ".github/workflows/container.yml"
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the multi-architecture image
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate add-on publishing namespace
+        if: github.event_name != 'pull_request'
+        run: |
+          if grep -R "REPLACE_WITH_OWNER" repository.json music_assistant_next/config.yaml; then
+            echo "Replace REPLACE_WITH_OWNER before publishing" >&2
+            exit 1
+          fi
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/music-assistant-next
+          tags: |
+            type=ref,event=tag
+            type=raw,value=edge,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.next
+          platforms: linux/amd64,linux/arm64
+          push: ${{ startsWith(github.ref, 'refs/tags/') || inputs.publish }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: MASS_VERSION=2.11.0-next.1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify tag matches add-on version
+        run: |
+          version=$(sed -n 's/^version: //p' music_assistant_next/config.yaml)
+          test "v$version" = "${GITHUB_REF_NAME}"
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body_path: music_assistant_next/CHANGELOG.md

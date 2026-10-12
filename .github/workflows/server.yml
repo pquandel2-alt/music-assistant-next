@@ -1,0 +1,53 @@
+name: Server
+
+on:
+  pull_request:
+    paths: ["server/**", "frontend/pyproject.toml", ".github/workflows/server.yml"]
+  push:
+    branches: [main]
+    paths: ["server/**", "frontend/pyproject.toml", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uvx ruff==0.16.5 check server/music_assistant/controllers/music/recommendations/controller.py server/tests/controllers/music/test_recommendations.py
+      - run: uvx ruff==0.16.5 format --check server/music_assistant/controllers/music/recommendations/controller.py server/tests/controllers/music/test_recommendations.py
+
+  tests:
+    runs-on: ubuntu-latest
+    container: ghcr.io/music-assistant/base:latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=4096
+      URLLIB3_NO_OVERRIDE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.8.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v10
+      - name: Build frontend package payload
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+      - name: Install server, local frontend and tests
+        run: >-
+          uv pip install --system --index-strategy unsafe-best-match
+          ./frontend './server[test]' -r server/requirements_all.txt
+      - name: Run discovery and recommendation tests
+        working-directory: server
+        run: |
+          mypy music_assistant/controllers/music/recommendations/controller.py
+          pytest tests/controllers/music/test_recommendations.py tests/controllers/music/test_recommendations_items.py tests/controllers/music/test_recommendations_timeouts.py
