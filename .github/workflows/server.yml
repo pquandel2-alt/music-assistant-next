@@ -39,10 +39,10 @@ jobs:
         with:
           node-version: 22
       - uses: astral-sh/setup-uv@v10.3.0
-      - name: Install Git for source dependencies
+      - name: Install source build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git
+          apt-get install -y --no-install-recommends git gcc g++
           rm -rf /var/lib/apt/lists/*
       - name: Build frontend package payload
         working-directory: frontend
