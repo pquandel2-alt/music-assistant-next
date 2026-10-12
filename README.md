@@ -34,8 +34,8 @@ history, configurable Discover rows, Last.fm/MusicBrainz recommendations, provid
 and player management. Those capabilities are preserved and documented rather than duplicated.
 
 No production Home Assistant installation has been modified. No image has been published from
-this environment. Replace `REPLACE_WITH_OWNER`, publish the image, and perform the documented
-backup-first migration before installing.
+this environment. Publish the configured GHCR image and perform the documented backup-first
+migration before installing.
 
 ## Layout
 

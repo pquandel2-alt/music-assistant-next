@@ -1,18 +1,15 @@
 # Home Assistant Supervisor installation
 
-The repository is prepared but cannot be published without a GitHub owner/registry namespace.
+The repository is configured for `pquandel2-alt/music-assistant-next` and its GHCR namespace.
 
 ## Publisher steps
 
-1. Create a GitHub repository for this source.
-2. Replace every `REPLACE_WITH_OWNER` in `repository.json` and
-   `music_assistant_next/config.yaml` with the lowercase GitHub owner.
-3. Enable GitHub Actions packages write permission. The workflow needs only `contents: read` and
+1. Enable GitHub Actions packages write permission. The workflow needs only `contents: read` and
    `packages: write`; no Spotify or Home Assistant secret belongs in GitHub.
-4. Push a `v2.11.0-next.1` tag or run the container workflow manually.
-5. Verify that `ghcr.io/<owner>/music-assistant-next:2.11.0-next.1` has an amd64 and arm64 manifest
+2. Push a `v2.11.0-next.1` tag or run the container workflow manually.
+3. Verify that `ghcr.io/pquandel2-alt/music-assistant-next:2.11.0-next.1` has an amd64 and arm64 manifest
    and is public/readable by Home Assistant.
-6. Publish this repository. `repository.json` and `music_assistant_next/config.yaml` are already at
+4. Publish this repository. `repository.json` and `music_assistant_next/config.yaml` are already at
    the Supervisor-required root locations, so the repository URL can be added directly.
 
 ## User steps
