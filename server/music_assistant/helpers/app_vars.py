@@ -63,6 +63,10 @@ APP_VAR_NAMES = (
     "acoustid_api_key",
 )
 
+# Home Assistant add-on options that may provide public, user-owned application
+# identifiers to source builds. Secrets and OAuth tokens deliberately do not belong here.
+_ADDON_OPTION_APP_VARS = ("spotify_client_id",)
+
 # Fixed tag mixed into the per-key keystream. Combined with the per-build random salt stored
 # in app_secrets.json, this gives every key a distinct keystream.
 _DERIVATION_TAG = b"music-assistant/app-vars/v1"
@@ -92,6 +96,16 @@ def app_var(name: str) -> str:
 def has_bundled_app_vars() -> bool:
     """Return whether the bundled credentials of an official release build are present."""
     return _bundled() is not None
+
+
+def apply_addon_app_var_overrides(options: Mapping[str, object]) -> None:
+    """Apply supported Home Assistant add-on options as app-var environment overrides."""
+    for name in _ADDON_OPTION_APP_VARS:
+        value = options.get(name)
+        if not isinstance(value, str) or not (value := value.strip()):
+            continue
+        # An explicitly supplied container environment variable remains authoritative.
+        os.environ.setdefault(f"MASS_APP_VAR_{name.upper()}", value)
 
 
 @lru_cache(maxsize=1)

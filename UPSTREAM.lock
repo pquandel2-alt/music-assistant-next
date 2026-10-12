@@ -14,4 +14,4 @@ models.commit=3a5bea7ec7d7be9db92e95d466f6b021079d33b3
 server.models_package=music-assistant-models==1.1.221
 frontend.package=music-assistant-next-frontend==0.1.0
 server.version=2.11.0.dev20261011+next.1
-addon.version=2.11.0-next.1
+addon.version=2.11.0-next.2

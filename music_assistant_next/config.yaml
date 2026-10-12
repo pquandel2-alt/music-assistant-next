@@ -1,5 +1,5 @@
 name: Music Assistant Next
-version: 2.11.0-next.1
+version: 2.11.0-next.2
 slug: music_assistant_next
 description: Discovery-first Music Assistant fork with an integrated catalog artist explorer.
 url: https://github.com/pquandel2-alt/music-assistant-next
@@ -36,9 +36,11 @@ tmpfs: true
 options:
   log_level: info
   safe_mode: false
+  spotify_client_id: ""
 schema:
   log_level: list(debug|info|warning|error)
   safe_mode: bool
+  spotify_client_id: str
 privileged:
   - SYS_ADMIN
   - DAC_READ_SEARCH

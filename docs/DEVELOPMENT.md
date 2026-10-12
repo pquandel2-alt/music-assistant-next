@@ -44,7 +44,7 @@ media objects. It must never return streaming audio URLs.
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg MASS_VERSION=2.11.0-next.1 \
+  --build-arg MASS_VERSION=2.11.0-next.2 \
   -f Dockerfile.next .
 ```
 

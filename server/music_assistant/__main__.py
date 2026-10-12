@@ -21,6 +21,7 @@ from typing import Any, Final
 from colorlog import ColoredFormatter
 
 from music_assistant.constants import MASS_LOGGER_NAME, VERBOSE_LOG_LEVEL
+from music_assistant.helpers.app_vars import apply_addon_app_var_overrides
 from music_assistant.helpers.diagnostics import install_diagnostics_log_handler
 from music_assistant.helpers.json import json_loads
 from music_assistant.helpers.logging import activate_log_queue_handler
@@ -234,6 +235,11 @@ def main() -> None:
             hass_options = json_loads(_file.read())
     else:
         hass_options = {}
+
+    # Community/source images cannot redistribute the private app-variable bundle from
+    # official builds. Allow public, user-owned application identifiers to be supplied
+    # through explicitly supported Home Assistant add-on options instead.
+    apply_addon_app_var_overrides(hass_options)
 
     # prefer value in hass_options
     log_level = hass_options.get("log_level", args.log_level).upper()

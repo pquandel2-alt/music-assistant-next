@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 
 from music_assistant.helpers import app_vars as app_vars_module
-from music_assistant.helpers.app_vars import APP_VAR_NAMES, app_var, has_bundled_app_vars
+from music_assistant.helpers.app_vars import (
+    APP_VAR_NAMES,
+    app_var,
+    apply_addon_app_var_overrides,
+    has_bundled_app_vars,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +61,26 @@ def test_env_override_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setenv("MASS_APP_VARS_FILE", str(file))
     monkeypatch.setenv("MASS_APP_VAR_SPOTIFY_CLIENT_ID", "from_env")
     assert app_var("spotify_client_id") == "from_env"
+
+
+def test_addon_spotify_client_id_becomes_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user-owned Spotify Client ID from add-on options is available to providers."""
+    monkeypatch.delenv("MASS_APP_VAR_SPOTIFY_CLIENT_ID", raising=False)
+    apply_addon_app_var_overrides({"spotify_client_id": "  own-client-id  "})
+    assert os.environ["MASS_APP_VAR_SPOTIFY_CLIENT_ID"] == "own-client-id"
+
+
+def test_addon_override_ignores_blank_and_preserves_explicit_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blank options do nothing and cannot replace an explicit container override."""
+    monkeypatch.delenv("MASS_APP_VAR_SPOTIFY_CLIENT_ID", raising=False)
+    apply_addon_app_var_overrides({"spotify_client_id": "   "})
+    assert "MASS_APP_VAR_SPOTIFY_CLIENT_ID" not in os.environ
+
+    monkeypatch.setenv("MASS_APP_VAR_SPOTIFY_CLIENT_ID", "from-env")
+    apply_addon_app_var_overrides({"spotify_client_id": "from-options"})
+    assert os.environ["MASS_APP_VAR_SPOTIFY_CLIENT_ID"] == "from-env"
 
 
 def test_local_json_file_via_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

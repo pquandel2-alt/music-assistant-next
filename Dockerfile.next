@@ -58,7 +58,7 @@ COPY --from=cliairplay-download /cliairplay /cliairplay
 #
 FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS builder
 ARG TARGETARCH
-ARG MASS_VERSION=2.11.0-next.1
+ARG MASS_VERSION=2.11.0-next.2
 
 COPY --from=wheel-builder /dist dist
 COPY server/requirements_all.txt .
