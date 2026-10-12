@@ -1,4 +1,4 @@
-export const DEFAULT_PAGE_TITLE = "Music Assistant - Your music, Your way";
+export const DEFAULT_PAGE_TITLE = "Music Assistant Next";
 
 export function getPageTitle(title?: string, artist?: string): string {
   const normalizedTitle = title?.trim();

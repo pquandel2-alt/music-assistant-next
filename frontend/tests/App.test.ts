@@ -865,7 +865,7 @@ describe("App initialization", () => {
 
     wrapper = await mountApp();
 
-    expect(document.title).toBe("Music Assistant - Your music, Your way");
+    expect(document.title).toBe("Music Assistant Next");
   });
 
   it("uses the branded browser title when browser media controls are disabled", async () => {
@@ -879,7 +879,7 @@ describe("App initialization", () => {
 
     wrapper = await mountApp();
 
-    expect(document.title).toBe("Music Assistant - Your music, Your way");
+    expect(document.title).toBe("Music Assistant Next");
   });
 
   it("updates the browser title when browser media controls are toggled", async () => {
@@ -890,7 +890,7 @@ describe("App initialization", () => {
     wrapper = await mountApp();
     saveDeviceSetting("enable_browser_controls", "disabled");
     await nextTick();
-    expect(document.title).toBe("Music Assistant - Your music, Your way");
+    expect(document.title).toBe("Music Assistant Next");
 
     saveDeviceSetting("enable_browser_controls", "web_player");
     await nextTick();

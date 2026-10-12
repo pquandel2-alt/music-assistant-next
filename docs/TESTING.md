@@ -17,6 +17,7 @@ Completed locally on 2026-10-12:
 - Vue TypeScript check with Node 22 and a 4 GB heap: passed.
 - Vite production/PWA build: passed; the `ArtistDiscovery` route is emitted as a lazy chunk.
 - Python frontend wheel build and payload inspection: passed.
+- Browser-title/App regression scope after the final Next branding change: 72/72 tests passed.
 - Oxlint, ESLint and the upstream Prettier scope: passed.
 - Full Vitest run: 434/435 files and 5273/5275 tests passed with the default five-second timeout.
   Two unchanged `AIRadioView` UI tests timed out at the threshold on this four-core host. Repeating
@@ -27,11 +28,20 @@ Completed locally on 2026-10-12:
 - Targeted server recommendation/discovery suites under Python 3.14.2 with all provider
   requirements: 51/51 passed.
 - JSON, TOML, Supervisor add-on YAML and GitHub workflow YAML parsing: passed.
+- Integrated browser smoke test against the real local server: passed. An isolated data/cache
+  directory and a temporary FFmpeg 7.0.2 binary were used; no production data was mounted. The
+  test completed first-run account setup, opened the Discover home, navigated from **Artists** to
+  `/artists/discover`, verified the honest no-provider empty state, and exercised 1440x900 and
+  390x844 layouts. The API WebSocket and browser Sendspin player connected; there were no uncaught
+  browser errors. The only console warning was the frontend proxy bridge's transient remote-mode
+  acknowledgement timeout. Screenshots are temporary test evidence under
+  `/tmp/ma-next-browser-qa/screenshots/` and are not release artifacts.
 
-Browser tests with a real Spotify account, playback device, Home Assistant Supervisor installation,
-multi-architecture container build and data migration require external systems; they remain untested
-until performed on an isolated host. Docker/Podman was not installed in the local environment, so
-the multi-architecture image is implemented in CI but not claimed as locally built.
+Browser tests with a real Spotify account and external catalog results, a physical playback device,
+Home Assistant Supervisor installation, multi-architecture container build and data migration require
+external systems; they remain untested until performed on an isolated host. Docker/Podman was not
+installed in the local environment, so the multi-architecture image is implemented in CI but not
+claimed as locally built.
 
 ## Required integration smoke test
 
