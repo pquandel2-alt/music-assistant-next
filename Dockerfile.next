@@ -2,7 +2,9 @@
 
 ARG BASE_IMAGE_VERSION=latest
 
-FROM node:24-bookworm-slim AS frontend-assets
+# Frontend assets and both Python wheels are architecture-independent. Build them
+# once on the native runner instead of repeating them under arm64 QEMU.
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS frontend-assets
 WORKDIR /src/frontend
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN corepack enable && corepack prepare pnpm@11.8.0 --activate
@@ -11,7 +13,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
 RUN pnpm build
 
-FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS wheel-builder
+FROM --platform=$BUILDPLATFORM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION AS wheel-builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --from=frontend-assets /src/frontend /src/frontend
 COPY server /src/server
