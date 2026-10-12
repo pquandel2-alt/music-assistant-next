@@ -39,6 +39,11 @@ jobs:
         with:
           node-version: 22
       - uses: astral-sh/setup-uv@v10.3.0
+      - name: Install Git for source dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git
+          rm -rf /var/lib/apt/lists/*
       - name: Build frontend package payload
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
