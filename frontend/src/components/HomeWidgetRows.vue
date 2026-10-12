@@ -1,0 +1,1240 @@
+<template>
+  <div>
+    <div v-if="loading" class="ed-loading">
+      <v-progress-circular indeterminate />
+    </div>
+
+    <template v-else>
+      <div ref="listEl" class="ed-rows">
+        <div
+          v-for="(row, idx) in displayedRows"
+          :key="row.id"
+          class="ed-row"
+          :data-drag-index="idx"
+          :class="{ 'ed-row--drag-source': draggingIndex === idx }"
+          :style="
+            isDragging
+              ? {
+                  transform: `translateY(${rowOffset(idx)}px)`,
+                  transition:
+                    draggingIndex !== idx ? 'transform 200ms ease-out' : 'none',
+                }
+              : undefined
+          "
+        >
+          <!-- Players row -->
+          <EditorialShelf
+            v-if="row.kind === 'players'"
+            :ref="setPlayersShelfRef"
+            class="ed-players"
+            :gap="12"
+            :nav-center="42"
+            :dimmed="editMode && row.hidden"
+          >
+            <template #header>
+              <div class="ed-players__head">
+                <h2 class="ed-players__label text-foreground">
+                  {{ $t("players") }}
+                </h2>
+                <span v-if="activeCount" class="ed-players__count">
+                  {{ activeCount }} {{ $t("state.playing") }}
+                </span>
+              </div>
+            </template>
+            <template v-if="editMode" #actions>
+              <button
+                class="ed-drag-handle"
+                :aria-label="$t('queue_reorder')"
+                @pointerdown.stop.prevent="startItemDrag($event, idx)"
+                @click.stop
+              >
+                <GripVertical />
+              </button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                :aria-label="$t('tooltip.toggle_players')"
+                @click="toggleRow(row)"
+              >
+                <Eye v-if="!row.hidden" />
+                <EyeOff v-else />
+              </Button>
+            </template>
+            <div
+              v-for="player in players"
+              :key="player.player_id"
+              class="ed-player-slot"
+              :data-player-id="player.player_id"
+            >
+              <PlayerCard
+                :player="player"
+                :show-volume-control="false"
+                :show-menu-button="false"
+                :show-child-volumes="false"
+                :show-group-controls="false"
+                @click="playerClicked(player)"
+              />
+            </div>
+          </EditorialShelf>
+
+          <!-- Top picks row -->
+          <EditorialShelf
+            v-else-if="row.kind === 'top_picks'"
+            class="ed-hero-row"
+            :nav-center="160"
+            :dimmed="editMode && row.hidden"
+            style="--ed-card-pad: 0px"
+          >
+            <template #header>
+              <div class="ed-hero-row__title-group">
+                <h2 class="ed-hero-row__title">
+                  {{ $t("top_picks_for_you") }}
+                </h2>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  :title="$t('refresh')"
+                  :disabled="heroRefreshing"
+                  @click="refreshTopPicks"
+                >
+                  <RefreshCw
+                    :class="{ 'ed-hero-refresh--spinning': heroRefreshing }"
+                  />
+                </Button>
+              </div>
+            </template>
+            <template v-if="editMode" #actions>
+              <button
+                class="ed-drag-handle"
+                :aria-label="$t('queue_reorder')"
+                @pointerdown.stop.prevent="startItemDrag($event, idx)"
+                @click.stop
+              >
+                <GripVertical />
+              </button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                :aria-label="$t('tooltip.toggle_top_picks')"
+                @click="toggleRow(row)"
+              >
+                <Eye v-if="!row.hidden" />
+                <EyeOff v-else />
+              </Button>
+            </template>
+            <EditorialHeroCard
+              class="ed-hero-grid__lead"
+              :item="heroEntries[0].item"
+              :tag="heroEntries[0].tag"
+              large
+            />
+            <div
+              v-for="(col, i) in heroColumns"
+              :key="i"
+              class="ed-hero-grid__col"
+            >
+              <EditorialHeroCard
+                v-for="entry in col"
+                :key="entry.item.uri"
+                :item="entry.item"
+                :tag="entry.tag"
+              />
+            </div>
+          </EditorialShelf>
+
+          <!-- Timeline recommendation -->
+          <EditorialTimeline
+            v-if="
+              row.kind === 'recommendation' &&
+              row.folder?.type === RecommendationFolderType.TIMELINE &&
+              rowItemsMap.get(row.id) !== undefined
+            "
+            :title="row.folder.name"
+            :provider="folderProvider(row.folder)"
+            :items="rowItemsMap.get(row.id) ?? []"
+            :dimmed="editMode && row.hidden"
+            :tiles-per-view="tilesPerView"
+          >
+            <template v-if="editMode" #actions>
+              <button
+                class="ed-drag-handle"
+                :aria-label="$t('queue_reorder')"
+                @pointerdown.stop.prevent="startItemDrag($event, idx)"
+                @click.stop
+              >
+                <GripVertical />
+              </button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                :aria-label="$t('tooltip.toggle_row')"
+                @click="toggleRow(row)"
+              >
+                <Eye v-if="!row.hidden" />
+                <EyeOff v-else />
+              </Button>
+            </template>
+          </EditorialTimeline>
+
+          <!-- Recommendation shelf (including timeline loading state) -->
+          <EditorialShelf
+            v-else-if="row.kind === 'recommendation' && row.folder"
+            :title="row.folder.name"
+            :subtitle="row.folder.subtitle"
+            :provider="folderProvider(row.folder)"
+            :dimmed="editMode && row.hidden"
+            :tiles-per-view="tilesPerView"
+          >
+            <template
+              v-if="editMode || rowSupportsProviderFilter(row.folder)"
+              #actions
+            >
+              <template v-if="editMode">
+                <button
+                  class="ed-drag-handle"
+                  :aria-label="$t('queue_reorder')"
+                  @pointerdown.stop.prevent="startItemDrag($event, idx)"
+                  @click.stop
+                >
+                  <GripVertical />
+                </button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  :aria-label="$t('tooltip.toggle_row')"
+                  @click="toggleRow(row)"
+                >
+                  <Eye v-if="!row.hidden" />
+                  <EyeOff v-else />
+                </Button>
+              </template>
+              <FacetedFilter
+                v-if="rowSupportsProviderFilter(row.folder)"
+                :model-value="getRowHiddenProviders(row.id)"
+                :title="$t('tooltip.hide_provider')"
+                :options="providerFilterOptions"
+                @update:model-value="
+                  (providerIds) =>
+                    onRowHiddenProvidersChange(row.id, providerIds)
+                "
+              >
+                <template #trigger>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    :aria-label="$t('tooltip.hide_provider')"
+                  >
+                    <span class="relative inline-flex">
+                      <ListFilter />
+                      <span
+                        v-if="rowHasActiveFilter(row)"
+                        :class="ACTIVE_DOT_CLASS"
+                      ></span>
+                    </span>
+                  </Button>
+                </template>
+              </FacetedFilter>
+            </template>
+            <!-- Skeleton tiles while a fetch is in flight - and for hidden rows
+                 in edit mode (never fetched until unhidden) - so every row
+                 reserves its final height and nothing shifts as items land. -->
+            <template v-if="rowItemsMap.get(row.id) === undefined">
+              <EditorialCardSkeleton
+                v-for="n in skeletonTileCount"
+                :key="`skeleton-${n}`"
+              />
+            </template>
+            <template
+              v-else-if="
+                (rowItemsMap.get(row.id)?.length ?? 0) === 0 &&
+                rowHasActiveFilter(row)
+              "
+            >
+              <p class="ed-shelf__empty">{{ $t("no_content_filter") }}</p>
+            </template>
+            <template v-else>
+              <EditorialMediaCard
+                v-for="item in rowItemsMap.get(row.id) ?? []"
+                :key="item.uri"
+                :item="item"
+              />
+            </template>
+          </EditorialShelf>
+
+          <!-- Genres row -->
+          <section
+            v-else-if="row.kind === 'genres'"
+            class="ed-section ed-genres"
+            :class="{ 'ed-dimmed': editMode && row.hidden }"
+          >
+            <div class="ed-genres__head">
+              <h2 class="ed-genres__title">{{ $t("browse_by_genre") }}</h2>
+              <div v-if="editMode" class="ed-edit-controls">
+                <button
+                  class="ed-drag-handle"
+                  :aria-label="$t('queue_reorder')"
+                  @pointerdown.stop.prevent="startItemDrag($event, idx)"
+                  @click.stop
+                >
+                  <GripVertical />
+                </button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  :title="
+                    row.hidden ? $t('settings.enable') : $t('settings.disable')
+                  "
+                  :aria-label="
+                    row.hidden ? $t('settings.enable') : $t('settings.disable')
+                  "
+                  @click="toggleRow(row)"
+                >
+                  <Eye v-if="!row.hidden" />
+                  <EyeOff v-else />
+                </Button>
+              </div>
+            </div>
+            <div class="ed-genres__grid">
+              <EditorialGenreTile
+                v-for="genre in genres"
+                :key="genre.uri"
+                :item="genre"
+              />
+            </div>
+          </section>
+        </div>
+
+        <!-- Floating ghost that follows the pointer while dragging a row -->
+        <div
+          v-if="isDragging && draggedRow"
+          class="ed-drag-ghost"
+          :style="{ top: `${ghostY}px` }"
+        >
+          <GripVertical class="ed-drag-ghost__icon" />
+          <span class="ed-drag-ghost__title">{{ draggedRow.title }}</span>
+        </div>
+      </div>
+
+      <div class="ed-footer-space"></div>
+    </template>
+  </div>
+</template>
+
+<script lang="ts">
+import type {
+  Genre,
+  ItemMapping,
+  MediaItemTypeOrItemMapping,
+  RecommendationFolder,
+} from "@/plugins/api/interfaces";
+
+// Snapshot taken on unmount so a back/forward navigation back to Discover
+// renders the previous page instantly instead of refetching from empty.
+interface DiscoverSnapshot {
+  recommendations: RecommendationFolder[];
+  recentlyPlayed: ItemMapping[];
+  rowItemsMap: Map<string, MediaItemTypeOrItemMapping[]>;
+  genres: Genre[];
+  scrollPos: number;
+}
+let prevState: DiscoverSnapshot | undefined;
+</script>
+
+<script setup lang="ts">
+import EditorialCardSkeleton from "@/components/discover/EditorialCardSkeleton.vue";
+import EditorialGenreTile from "@/components/discover/EditorialGenreTile.vue";
+import EditorialHeroCard from "@/components/discover/EditorialHeroCard.vue";
+import EditorialMediaCard from "@/components/discover/EditorialMediaCard.vue";
+import EditorialShelf, {
+  type EditorialShelfExpose,
+} from "@/components/discover/EditorialShelf.vue";
+import EditorialTimeline from "@/components/discover/EditorialTimeline.vue";
+import {
+  DEFAULT_PRIORITY_ROWS,
+  GENRES_ROW_ID,
+  IN_PROGRESS_ROW_ID,
+  PLAYERS_ROW_ID,
+  TOP_PICKS_ROW_ID,
+  resolveDiscoverRowsConfig,
+  setDiscoverRowHidden,
+  setDiscoverRowsOrder,
+} from "@/components/discover/utils/discoverRows";
+import {
+  isRecommendationRowVisible,
+  rowIdsNeedingItems,
+} from "@/components/discover/utils/rowItems";
+import {
+  eligibleFilterProviders,
+  getRowHiddenProviders,
+  resolveProviderFilterParam,
+  rowSupportsProviderFilter,
+  setRowHiddenProviders,
+} from "@/components/discover/utils/rowProviderFilter";
+import FacetedFilter from "@/components/FacetedFilter.vue";
+import PlayerCard from "@/components/PlayerCard.vue";
+import { Button } from "@/components/ui/button";
+import { useListDragReorder } from "@/composables/useListDragReorder";
+import { useOrderedPlayers } from "@/composables/useOrderedPlayers";
+import { returnedByHistory } from "@/helpers/navigation";
+import { panelViewItemResponsive } from "@/helpers/utils";
+import api from "@/plugins/api";
+import { ACTIVE_DOT_CLASS } from "@/constants";
+import {
+  EventType,
+  PlaybackState,
+  RecommendationFolderType,
+  type EventMessage,
+  type Player,
+  type PlaylogUpdate,
+} from "@/plugins/api/interfaces";
+import { getBreakpointValue } from "@/plugins/breakpoint";
+import { $t } from "@/plugins/i18n";
+import { store } from "@/plugins/store";
+import { Eye, EyeOff, GripVertical, ListFilter, RefreshCw } from "@lucide/vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import { useRouter } from "vue-router";
+
+const props = withDefaults(defineProps<{ editMode?: boolean }>(), {
+  editMode: false,
+});
+
+const router = useRouter();
+
+const loading = ref(true);
+const playersShelf = ref<EditorialShelfExpose | null>(null);
+// The row catalog (every available row, `items` always `[]`).
+const recommendations = ref<RecommendationFolder[]>([]);
+// Items fetched per row, keyed by folder uri. Absent = not loaded yet.
+const rowItemsMap = ref(new Map<string, MediaItemTypeOrItemMapping[]>());
+const recentlyPlayed = ref<ItemMapping[]>([]);
+const genres = ref<Genre[]>([]);
+
+const tilesPerView = computed(() => {
+  const isPhone = getBreakpointValue({ breakpoint: "bp1", condition: "lt" });
+  return isPhone ? 2.2 : panelViewItemResponsive(0) + 0.5;
+});
+
+// One skeleton per (partially) visible tile while a row's items load.
+const skeletonTileCount = computed(() =>
+  Math.max(2, Math.ceil(tilesPerView.value)),
+);
+
+const players = useOrderedPlayers();
+
+const activeCount = computed(
+  () =>
+    players.value.filter((p) => p.playback_state == PlaybackState.PLAYING)
+      .length,
+);
+
+function playerClicked(player: Player) {
+  store.activePlayerId = player.player_id;
+}
+
+const setPlayersShelfRef = (el: unknown) => {
+  playersShelf.value = (el as EditorialShelfExpose | null) ?? null;
+};
+
+const playersOrderKey = computed(() =>
+  players.value.map((p) => p.player_id).join(","),
+);
+
+function alignPlayersShelf() {
+  const shelf = playersShelf.value;
+  if (!shelf) return;
+  const activeId = store.activePlayerId;
+  if (activeId) {
+    shelf.alignItemStart(`[data-player-id="${activeId}"]`);
+  } else {
+    shelf.scrollToStart();
+  }
+}
+
+const showPlayers = computed(() =>
+  displayedRows.value.some((row) => row.kind === "players"),
+);
+
+watch(playersOrderKey, () => {
+  if (!showPlayers.value) return;
+  nextTick(alignPlayersShelf);
+});
+
+watch(loading, (isLoading) => {
+  if (!isLoading) nextTick(alignPlayersShelf);
+});
+
+watch(
+  () => store.activePlayerId,
+  () => {
+    if (!showPlayers.value) return;
+    nextTick(alignPlayersShelf);
+  },
+);
+
+// The provider whose icon labels a row. Builtin recommendation plugins (e.g.
+// Library Recommendations) aggregate the whole library, so their plugin logo
+// says nothing about the source -- only real music providers get an icon.
+const folderProvider = (folder: RecommendationFolder): string =>
+  api.getProviderManifest(folder.provider)?.builtin
+    ? ""
+    : folder.provider || "";
+
+// Provider instances a user may filter recommendation rows by -- the loaded
+// music providers, which the server limits to the sources the user may use.
+const providerFilterOptions = computed(() =>
+  eligibleFilterProviders(Object.values(api.providers))
+    .map((provider) => ({
+      value: provider.instance_id,
+      label: provider.name,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label)),
+);
+
+const providerFilterParamForRow = (rowId: string): string[] | undefined =>
+  resolveProviderFilterParam(
+    providerFilterOptions.value.map((option) => option.value),
+    getRowHiddenProviders(rowId),
+  );
+
+// Persists the row's hidden-provider choice and re-fetches just that row so
+// its items reflect the new filter. Clears the row's cached items first: the
+// preference (read by rowHasActiveFilter) updates synchronously, but the
+// refetch is async, so leaving the stale, now-mismatched items in place could
+// drop the row (and its filter control) from view for that gap.
+const onRowHiddenProvidersChange = (
+  rowId: string,
+  hiddenProviderIds: string[],
+): void => {
+  setRowHiddenProviders(rowId, hiddenProviderIds);
+  rowItemsMap.value.delete(rowId);
+  fetchRowItems([rowId]);
+};
+
+// Whether a row currently has eligible provider(s) hidden -- used to keep the
+// row (and its filter control) visible even if that filter empties its results.
+const rowHasActiveFilter = (row: DiscoverRow): boolean =>
+  row.folder !== undefined &&
+  rowSupportsProviderFilter(row.folder) &&
+  providerFilterParamForRow(row.id) !== undefined;
+
+// --- Top Picks (Model B): a balanced interleave of items across the rows the
+// user has enabled. Only shown, non-empty recommendation folders feed it, so
+// the mix reflects the user's enabled rows; recently-played fills any
+// shortfall. ---
+interface HeroEntry {
+  item: MediaItemTypeOrItemMapping;
+  tag: string;
+}
+// 1 large lead card + the rest split into columns of 2 (a horizontal scroller).
+const HERO_COUNT = 9;
+
+const shuffled = <T,>(arr: readonly T[]): T[] => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+const buildHeroEntries = (randomize = false): HeroEntry[] => {
+  // Each shown (non-hidden), non-empty folder contributes its items under its
+  // own tag, so an opted-out row never feeds the hero. `randomize` (explicit
+  // refresh) reshuffles the row order and the items within a row; the resolve
+  // path stays deterministic so repeated builds are content-equal.
+  const rows = recommendations.value
+    .filter((f) => shownRecRowIds.value.has(f.uri))
+    .map((f) => ({ tag: f.name, items: rowItemsMap.value.get(f.uri) ?? [] }))
+    .filter((r) => r.items.length > 0)
+    .map((r) => ({
+      tag: r.tag,
+      items: randomize ? shuffled(r.items) : r.items,
+    }));
+  const sources = randomize ? shuffled(rows) : rows;
+
+  const seen = new Set<string>();
+  const out: HeroEntry[] = [];
+  const push = (item: MediaItemTypeOrItemMapping | undefined, tag: string) => {
+    if (item && !seen.has(item.uri) && out.length < HERO_COUNT) {
+      seen.add(item.uri);
+      out.push({ item, tag });
+    }
+  };
+
+  // Round-robin: one item per row per pass, so the mix is balanced across rows.
+  const maxLen = sources.reduce((m, r) => Math.max(m, r.items.length), 0);
+  for (let i = 0; i < maxLen && out.length < HERO_COUNT; i++) {
+    for (const r of sources) push(r.items[i], r.tag);
+  }
+
+  // Fill any shortfall from recently played.
+  for (const item of recentlyPlayed.value) push(item, $t("recently_played"));
+
+  return out;
+};
+
+const heroEntries = ref<HeroEntry[]>([]);
+// Everything after the lead card, grouped into columns of 2 stacked cards.
+const heroColumns = computed<HeroEntry[][]>(() => {
+  const rest = heroEntries.value.slice(1);
+  const cols: HeroEntry[][] = [];
+  for (let i = 0; i < rest.length; i += 2) cols.push(rest.slice(i, i + 2));
+  return cols;
+});
+
+// Assign heroEntries only when the picks actually changed — cheap insurance
+// against redundant re-renders from repeated builds with identical content.
+const heroEntriesEqual = (a: HeroEntry[], b: HeroEntry[]) =>
+  a.length === b.length &&
+  a.every((e, i) => e.item.uri === b[i].item.uri && e.tag === b[i].tag);
+const setHeroEntries = (next: HeroEntry[]) => {
+  if (!heroEntriesEqual(heroEntries.value, next)) heroEntries.value = next;
+};
+
+const resolveHeroPicks = () => {
+  setHeroEntries(buildHeroEntries());
+};
+
+const heroRefreshing = ref(false);
+const refreshTopPicks = async () => {
+  if (heroRefreshing.value) return;
+  heroRefreshing.value = true;
+  try {
+    await refreshShownRowItems();
+    heroEntries.value = buildHeroEntries(true);
+  } finally {
+    heroRefreshing.value = false;
+  }
+};
+
+// --- Unified row list: visibility + ordering via the discover.rows pref ---
+type DiscoverRowKind = "players" | "top_picks" | "recommendation" | "genres";
+
+interface DiscoverRow {
+  id: string;
+  kind: DiscoverRowKind;
+  title: string;
+  hidden: boolean;
+  folder?: RecommendationFolder;
+}
+
+// The catalog is always complete (server always returns every row, `items`
+// aside), so every recommendation folder is a candidate row.
+const defaultHiddenIds = computed(() =>
+  recommendations.value.filter((f) => !f.enabled_by_default).map((f) => f.uri),
+);
+
+// Default order of every candidate row, well-known rows first, remaining
+// server rows as returned, genres last.
+const availableRowIds = computed<string[]>(() => {
+  const recUris = recommendations.value.map((d) => d.uri);
+  const recSet = new Set(recUris);
+  const ids: string[] = [];
+  for (const id of DEFAULT_PRIORITY_ROWS) {
+    if (id === PLAYERS_ROW_ID) {
+      if (players.value.length > 0) ids.push(id);
+    } else if (id === TOP_PICKS_ROW_ID) {
+      if (heroEntries.value.length > 0) ids.push(id);
+    } else if (recSet.has(id)) {
+      ids.push(id);
+    }
+  }
+  for (const uri of recUris) {
+    if (!ids.includes(uri)) ids.push(uri);
+  }
+  if (genres.value.length > 0) ids.push(GENRES_ROW_ID);
+  return ids;
+});
+
+const allRows = computed<DiscoverRow[]>(() => {
+  const { order, hidden } = resolveDiscoverRowsConfig(
+    availableRowIds.value,
+    defaultHiddenIds.value,
+  );
+  const folders = new Map(recommendations.value.map((d) => [d.uri, d]));
+  const rows: DiscoverRow[] = [];
+  for (const id of order) {
+    if (id === PLAYERS_ROW_ID) {
+      rows.push({
+        id,
+        kind: "players",
+        title: $t("players"),
+        hidden: hidden.has(id),
+      });
+    } else if (id === TOP_PICKS_ROW_ID) {
+      rows.push({
+        id,
+        kind: "top_picks",
+        title: $t("top_picks_for_you"),
+        hidden: hidden.has(id),
+      });
+    } else if (id === GENRES_ROW_ID) {
+      rows.push({
+        id,
+        kind: "genres",
+        title: $t("browse_by_genre"),
+        hidden: hidden.has(id),
+      });
+    } else {
+      const folder = folders.get(id);
+      if (!folder) continue;
+      rows.push({
+        id,
+        kind: "recommendation",
+        title: folder.name,
+        hidden: hidden.has(id),
+        folder,
+      });
+    }
+  }
+  return rows;
+});
+
+const displayedRows = computed(() =>
+  allRows.value.filter((row) =>
+    row.kind === "recommendation"
+      ? isRecommendationRowVisible(
+          row,
+          rowItemsMap.value.get(row.id),
+          props.editMode,
+          rowHasActiveFilter(row),
+        )
+      : props.editMode || !row.hidden,
+  ),
+);
+
+// The recommendation rows currently visible to the user (not hidden). The Top
+// Picks hero draws only from these, so an opted-out row never feeds it.
+const shownRecRowIds = computed(
+  () =>
+    new Set(
+      allRows.value
+        .filter((r) => r.kind === "recommendation" && !r.hidden)
+        .map((r) => r.id),
+    ),
+);
+
+const toggleRow = (row: DiscoverRow) => {
+  const wasHidden = row.hidden;
+  setDiscoverRowHidden(row.id, !wasHidden);
+  // Showing a row for the first time: fetch its items if we haven't already.
+  if (
+    wasHidden &&
+    row.kind === "recommendation" &&
+    !rowItemsMap.value.has(row.id)
+  ) {
+    fetchRowItems([row.id]);
+  }
+};
+
+// --- Drag-to-reorder (edit mode), same interaction as the navigation menu ---
+const listEl = ref<HTMLElement | null>(null);
+
+const { startItemDrag, draggingIndex, isDragging, ghostY, rowOffset } =
+  useListDragReorder({
+    listEl,
+    count: () => displayedRows.value.length,
+    onCommit: (from, to) => {
+      const ids = displayedRows.value.map((row) => row.id);
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      setDiscoverRowsOrder(ids, availableRowIds.value);
+    },
+  });
+
+const draggedRow = computed(() =>
+  draggingIndex.value != null
+    ? (displayedRows.value[draggingIndex.value] ?? null)
+    : null,
+);
+
+// Fetches the row catalog (every available row; `items` always `[]`) plus the
+// recently-played fallback for the Top Picks hero. Row content itself is
+// fetched separately, per row, into `rowItemsMap`.
+const loadRecommendationRows = async () => {
+  // Preserve the currently shown rows on a (transient) refresh failure instead
+  // of wiping them; log so a recurring failure is visible.
+  const [rows, recent] = await Promise.allSettled([
+    api.getRecommendations(),
+    api.getRecentlyPlayedItems(12),
+  ]);
+  if (rows.status === "fulfilled") recommendations.value = rows.value;
+  else console.error("Failed to load recommendations:", rows.reason);
+  if (recent.status === "fulfilled") recentlyPlayed.value = recent.value;
+  else console.error("Failed to load recently played:", recent.reason);
+};
+
+// Guards against a slower, superseded fetch overwriting a newer one for the
+// same row (e.g. rapid provider-filter changes).
+const rowFetchGeneration = new Map<string, number>();
+
+// Fetches and stores items for the given recommendation row ids, in parallel.
+// Each row's result lands in `rowItemsMap` as soon as its own fetch resolves.
+const fetchRowItems = async (ids: string[]): Promise<void> => {
+  const folders = new Map(recommendations.value.map((f) => [f.uri, f]));
+  await Promise.all(
+    ids.map(async (id) => {
+      const folder = folders.get(id);
+      if (!folder) return;
+      const generation = (rowFetchGeneration.get(id) ?? 0) + 1;
+      rowFetchGeneration.set(id, generation);
+      const providers = rowSupportsProviderFilter(folder)
+        ? providerFilterParamForRow(id)
+        : undefined;
+      const items = await api
+        .getRecommendationItems(folder.provider, folder.item_id, providers)
+        .catch((err) => {
+          console.error(
+            `Failed to load items for recommendation row ${id}:`,
+            err,
+          );
+          return undefined;
+        });
+      if (rowFetchGeneration.get(id) !== generation) return;
+      if (items !== undefined) {
+        rowItemsMap.value.set(id, items);
+      } else if (!rowItemsMap.value.has(id)) {
+        // first load failed: mark the row empty so it does not spin forever;
+        // on a refresh failure keep the previously shown items instead
+        rowItemsMap.value.set(id, []);
+      }
+    }),
+  );
+};
+
+// Fetches items for every currently-shown recommendation row that hasn't been
+// loaded yet. Hidden rows (default-off, or toggled off) are skipped; they load
+// on demand when unhidden.
+const fetchMissingRowItems = (): Promise<void> =>
+  fetchRowItems(
+    rowIdsNeedingItems(
+      allRows.value.filter((r) => r.kind === "recommendation"),
+    ).filter((id) => !rowItemsMap.value.has(id)),
+  );
+
+// Re-fetches items for all shown recommendation rows, regardless of whether
+// they're already loaded — feeds both the shelves and the Top Picks hero.
+const refreshShownRowItems = (): Promise<void> =>
+  fetchRowItems([...shownRecRowIds.value]);
+
+// "Browse by genre": show the 8 genres with the most linked media items
+// (most relevant to the user) rather than the first 8 alphabetically.
+const loadGenres = async () => {
+  const all = await api
+    .getLibraryGenres({ hide_empty: true })
+    .catch(() => [] as Genre[]);
+  if (!all.length) return;
+  // without counts the genres keep the server's (name) order
+  const counts = await api
+    .getGenreMediaCounts(all.map((g) => g.item_id))
+    .catch(() => ({}) as Record<string, Record<string, number>>);
+  const total = (id: string) =>
+    Object.values(counts[id] ?? {}).reduce((sum, n) => sum + n, 0);
+  genres.value = [...all]
+    .sort((a, b) => total(b.item_id) - total(a.item_id))
+    .slice(0, 8);
+};
+
+let unmounted = false;
+let refreshRecommendationsTimer: ReturnType<typeof setTimeout> | undefined;
+
+const cancelScheduledRecommendationRefresh = () => {
+  if (refreshRecommendationsTimer) {
+    clearTimeout(refreshRecommendationsTimer);
+    refreshRecommendationsTimer = undefined;
+  }
+};
+
+const scheduleRecommendationRefresh = () => {
+  cancelScheduledRecommendationRefresh();
+  refreshRecommendationsTimer = setTimeout(async () => {
+    refreshRecommendationsTimer = undefined;
+    if (unmounted) return;
+    // Refetches the catalog and the shown rows' content so play-history rows
+    // and rotated picks stay current.
+    await loadRecommendationRows();
+    if (unmounted) return;
+    await refreshShownRowItems();
+    if (unmounted) return;
+    resolveHeroPicks();
+  }, 1500);
+};
+
+const isFinishedPlaybackEvent = (
+  data: unknown,
+): data is { is_playing: false } =>
+  typeof data === "object" &&
+  data !== null &&
+  "is_playing" in data &&
+  data.is_playing === false;
+
+const unsubscribeRecommendations = api.subscribe(
+  EventType.MEDIA_ITEM_PLAYED,
+  (evt: EventMessage) => {
+    // Only refetch when a track actually finished (is_playing = false),
+    // not on the periodic ~30s progress reports that also emit this event.
+    if (isFinishedPlaybackEvent(evt.data)) {
+      scheduleRecommendationRefresh();
+    }
+  },
+);
+
+// Played or reset items leave the "in progress" row right away; partial progress
+// (pause, another app syncing) belongs in the row, so only the refresh acts on it.
+const unsubscribePlaylog = api.subscribe(
+  EventType.PLAYLOG_UPDATED,
+  (evt: EventMessage) => {
+    const update = evt.data as PlaylogUpdate | undefined;
+    // per-user playlog: ignore changes belonging to another user (null = everyone)
+    if (update?.userid && update.userid !== store.currentUser?.user_id) return;
+    const leavesInProgress =
+      update && (update.fully_played || update.seconds_played === 0);
+    const uri = update?.uri ?? evt.object_id;
+    const items = rowItemsMap.value.get(IN_PROGRESS_ROW_ID);
+    if (leavesInProgress && uri && items) {
+      rowItemsMap.value.set(
+        IN_PROGRESS_ROW_ID,
+        items.filter((item) => item.uri !== uri),
+      );
+    }
+    scheduleRecommendationRefresh();
+  },
+);
+
+const unsubscribeProviderEvents = api.subscribe(
+  EventType.PROVIDER_EVENT,
+  (evt: EventMessage) => {
+    if (
+      evt.data &&
+      typeof evt.data === "object" &&
+      "event" in evt.data &&
+      evt.data.event === "recommendations_updated"
+    ) {
+      scheduleRecommendationRefresh();
+    }
+  },
+);
+
+onMounted(async () => {
+  // Genres is its own row and isn't part of the fast catalog call, so it
+  // doesn't gate the page spinner.
+  loadGenres();
+
+  // the page comes up as it was left only when gone back to; a fresh
+  // navigation loads it anew
+  if (prevState && returnedByHistory(router)) {
+    const snapshot = prevState;
+    recommendations.value = snapshot.recommendations;
+    recentlyPlayed.value = snapshot.recentlyPlayed;
+    rowItemsMap.value = snapshot.rowItemsMap;
+    genres.value = snapshot.genres;
+    resolveHeroPicks();
+    loading.value = false;
+    nextTick(() => {
+      const el = document.querySelector(
+        ".content-section",
+      ) as HTMLElement | null;
+      if (el) el.scrollTop = snapshot.scrollPos;
+    });
+
+    // Refresh everything in the background so the restored page stays current.
+    await loadRecommendationRows();
+    if (unmounted) return;
+    await refreshShownRowItems();
+    if (unmounted) return;
+    resolveHeroPicks();
+    return;
+  }
+
+  await loadRecommendationRows();
+  if (unmounted) return;
+  loading.value = false;
+
+  await fetchMissingRowItems();
+  if (unmounted) return;
+  resolveHeroPicks();
+});
+
+onBeforeUnmount(() => {
+  unmounted = true;
+  unsubscribeRecommendations();
+  unsubscribeProviderEvents();
+  unsubscribePlaylog();
+  cancelScheduledRecommendationRefresh();
+
+  const el = document.querySelector(".content-section");
+  prevState = {
+    recommendations: recommendations.value,
+    recentlyPlayed: recentlyPlayed.value,
+    rowItemsMap: rowItemsMap.value,
+    genres: genres.value,
+    scrollPos: el?.scrollTop ?? 0,
+  };
+});
+</script>
+
+<style scoped>
+.ed-loading {
+  display: flex;
+  justify-content: center;
+  padding: 80px 0;
+}
+.ed-section {
+  margin-bottom: 32px;
+}
+
+.ed-rows {
+  position: relative;
+}
+.ed-row {
+  position: relative;
+}
+.ed-row--drag-source {
+  opacity: 0.35;
+}
+
+.ed-edit-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.ed-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: grab;
+  touch-action: none;
+}
+.ed-drag-handle:active {
+  cursor: grabbing;
+}
+.ed-drag-handle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ed-drag-ghost {
+  position: absolute;
+  left: 28px;
+  right: 28px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  background: rgb(var(--v-theme-panel));
+  color: rgb(var(--v-theme-on-background));
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  font-size: 15px;
+  font-weight: 600;
+  opacity: 0.95;
+  pointer-events: none;
+  cursor: grabbing;
+}
+.ed-drag-ghost__icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+.ed-drag-ghost__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ed-players {
+  --ed-card-pad: 0px;
+  margin-top: 4px;
+}
+.ed-players :deep(.ed-shelf__track) {
+  align-items: stretch;
+}
+.ed-players__head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ed-players__label {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+.ed-players__count {
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.45);
+}
+.ed-player-slot {
+  display: flex;
+  flex: 0 0 auto;
+  width: 280px;
+  scroll-snap-align: start;
+}
+.ed-player-slot :deep([data-slot="card"]) {
+  width: 100%;
+}
+.ed-player-slot :deep(.panel-item) {
+  height: auto;
+  margin-top: 0;
+  margin-bottom: 0;
+  max-width: 100%;
+}
+.ed-player-slot :deep(.panel-item-details .v-list-item__content) {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ed-dimmed {
+  opacity: 0.4;
+}
+.ed-shelf__empty {
+  min-width: 100%;
+  padding: 8px 4px;
+  font-size: 0.875rem;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+.ed-hero-row__title-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ed-hero-row__title {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.6px;
+  color: rgb(var(--v-theme-on-background));
+}
+.ed-hero-refresh--spinning {
+  animation: ed-hero-refresh-spin 0.8s linear infinite;
+}
+@keyframes ed-hero-refresh-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* Horizontal scroller: fixed-size lead + columns of 2, so cards don't stretch
+   on wide screens. The default viewport shows the lead + 2 columns; the
+   remaining columns scroll into view (and fit outright on big screens). */
+.ed-hero-row :deep(.ed-shelf__track) {
+  height: 320px;
+  overflow-y: hidden;
+  padding-block: 0;
+}
+.ed-hero-grid__lead {
+  flex: 1.5 0 520px;
+  height: 100%;
+  scroll-snap-align: start;
+}
+.ed-hero-grid__col {
+  flex: 1 0 360px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  scroll-snap-align: start;
+}
+.ed-hero-grid__col > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.ed-genres {
+  padding: 0 28px;
+}
+.ed-genres__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.ed-genres__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.4px;
+  color: rgb(var(--v-theme-on-background));
+}
+.ed-genres__grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.ed-footer-space {
+  height: 40px;
+}
+
+@media (max-width: 900px) {
+  .ed-genres__grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .ed-hero-row :deep(.ed-shelf__track) {
+    height: auto;
+    gap: 12px;
+    overflow-y: visible;
+    scroll-snap-type: x mandatory;
+  }
+  .ed-hero-grid__col {
+    display: contents;
+  }
+  .ed-hero-row :deep(.ed-hero) {
+    flex: 0 0 44%;
+    height: 220px;
+    min-height: 0;
+    scroll-snap-align: start;
+  }
+
+  .ed-hero-row :deep(.ed-hero--large .ed-hero__title) {
+    font-size: 18px;
+  }
+  .ed-hero-row :deep(.ed-hero--large .ed-hero__content) {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 600px) {
+  .ed-section {
+    margin-bottom: 16px;
+  }
+  .ed-genres {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .ed-hero-row :deep(.ed-hero) {
+    flex: 0 0 82%;
+    height: 200px;
+  }
+  .ed-hero-row__title {
+    font-size: 22px;
+  }
+  .ed-drag-ghost {
+    left: 16px;
+    right: 16px;
+  }
+}
+</style>

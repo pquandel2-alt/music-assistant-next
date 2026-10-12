@@ -1,0 +1,489 @@
+// several helpers for dealing with the api and its (media) items
+
+import { watch } from "vue";
+import api, { ConnectionState } from ".";
+import {
+  Audiobook,
+  AudioSource,
+  CrossfadeMode,
+  MediaItemType,
+  ItemMapping,
+  MediaType,
+  Player,
+  PlayerQueue,
+  Playlist,
+  PodcastEpisode,
+  ProviderFeature,
+  ProviderInstance,
+  ProviderMapping,
+  ProviderType,
+  QueueItem,
+} from "./interfaces";
+
+/**
+ * Resolve once the API connection is fully initialized (server state such as
+ * providers and players has been fetched). Resolves immediately when already
+ * initialized. Use before commands whose result depends on that state being
+ * present (e.g. provider-presence checks).
+ */
+export async function waitForApiInitialization(): Promise<void> {
+  if (api.state.value === ConnectionState.INITIALIZED) return;
+
+  await new Promise<void>((resolve) => {
+    const unwatch = watch(
+      () => api.state.value,
+      (newState) => {
+        if (newState === ConnectionState.INITIALIZED) {
+          unwatch();
+          resolve();
+        }
+      },
+      { immediate: true },
+    );
+  });
+}
+
+/**
+ * Returns true when the queue's current item is an infinite stream
+ * (radio station or AudioSource). Shuffle and repeat don't apply in that case.
+ */
+export const isQueueInfiniteStream = function (
+  queue: PlayerQueue | undefined,
+): boolean {
+  const mediaType = queue?.current_item?.media_item?.media_type;
+  return mediaType === MediaType.RADIO || mediaType === MediaType.AUDIO_SOURCE;
+};
+
+/**
+ * Returns the provider serving a queue's current item when that source is the one
+ * crossfading it, or undefined when Music Assistant applies the fade (or none is).
+ *
+ * The queue's crossfade settings say nothing about who acts on them: a source that
+ * fades its own playback is handed the setting and does the overlap itself, so none
+ * of our timing reaches the audio.
+ */
+export const queueSourceCrossfadeProvider = function (
+  queue: PlayerQueue | undefined,
+): string | undefined {
+  const streamDetails = queue?.current_item?.streamdetails;
+  const crossfadeMode =
+    streamDetails?.audio_processing?.queue_processing?.crossfade_mode;
+  return crossfadeMode === CrossfadeMode.SOURCE
+    ? streamDetails?.provider
+    : undefined;
+};
+
+/**
+ * Type guard for AudioSource media items.
+ * AudioSource is a first-class MediaItem representing a plugin source
+ * (Spotify Connect, AirPlay receiver, Snapcast, etc.) — its capability
+ * flags drive which transport controls are surfaced when active.
+ */
+export const isAudioSource = function (
+  item: MediaItemType | ItemMapping | null | undefined,
+): item is AudioSource {
+  return item?.media_type === MediaType.AUDIO_SOURCE;
+};
+
+/**
+ * Type guard for media items that track played state (fully_played /
+ * resume_position_ms): podcast episodes and audiobooks.
+ */
+export const itemSupportsPlayLog = function (
+  item: MediaItemType | ItemMapping | undefined,
+): item is Audiobook | PodcastEpisode {
+  return (
+    item?.media_type === MediaType.PODCAST_EPISODE ||
+    item?.media_type === MediaType.AUDIOBOOK
+  );
+};
+
+/**
+ * Whether the item is a member of the user's library.
+ *
+ * Membership is derived from the per-provider-mapping in_library flag, NOT from
+ * provider == "library". The backend creates library DB rows for an item's
+ * relatives (an artist/album reached from a saved track) as relational support,
+ * so a "library" row may exist without the item being a library member.
+ */
+export const isItemInLibrary = function (
+  item: MediaItemType | ItemMapping | null | undefined,
+): boolean {
+  // an item mapping or a browse folder carries no membership of its own
+  if (!item || !("provider_mappings" in item)) return false;
+  // favoriting forces an item into the library, so favorite implies membership
+  if (item.favorite === true) return true;
+  return (
+    Array.isArray(item.provider_mappings) &&
+    item.provider_mappings.some((pm) => !!pm.in_library)
+  );
+};
+
+/**
+ * Domain to feed ProviderIcon for an item's source/membership badge.
+ * Any in-library item shows the library (bookshelf) icon, regardless of media
+ * type, so the user can tell at a glance whether it is in or out of library.
+ * Items outside the library show the icon of their first provider mapping (or
+ * the item's own provider as a fallback).
+ */
+export const getProviderIconDomain = function (
+  item: MediaItemType | ItemMapping,
+): string {
+  if (isItemInLibrary(item)) return "library";
+  if (
+    "provider_mappings" in item &&
+    Array.isArray(item.provider_mappings) &&
+    item.provider_mappings.length > 0
+  ) {
+    return item.provider_mappings[0].provider_domain;
+  }
+  return item.provider;
+};
+
+/**
+ * The music services an item is mapped to, named after the service itself.
+ *
+ * Several accounts of the same service share one entry: which account holds the
+ * item is a detail of the mapping, not of the item. A mapping nothing can
+ * name is left out rather than shown as its raw domain.
+ */
+export function mappedServices(item: {
+  provider_mappings: ProviderMapping[];
+}): Array<{ domain: string; name: string }> {
+  const seen = new Set<string>();
+  const services: Array<{ domain: string; name: string }> = [];
+  for (const mapping of item.provider_mappings) {
+    if (seen.has(mapping.provider_domain)) continue;
+    const name =
+      api.getProviderManifest(mapping.provider_domain)?.name ||
+      api.getProvider(mapping.provider_instance)?.name;
+    if (!name) continue;
+    seen.add(mapping.provider_domain);
+    services.push({ domain: mapping.provider_domain, name });
+  }
+  return services;
+}
+
+/**
+ * The name to show for a provider instance: the service's own name for a
+ * streaming provider, whose accounts all offer the same catalog, else the
+ * instance's name.
+ */
+export function providerServiceName(provider: ProviderInstance): string {
+  if (!provider.is_streaming_provider) return provider.name;
+  return api.providerManifests[provider.domain]?.name || provider.name;
+}
+
+/**
+ * Provider icon domain for media listing tiles. Playlists always surface their
+ * source provider icon: a playlist listing is library-only by definition, so a
+ * bookshelf icon would be redundant and the source is the useful signal. Every
+ * other item type follows getProviderIconDomain.
+ */
+export const getListItemProviderIconDomain = function (
+  item: MediaItemType | ItemMapping,
+): string {
+  if (
+    item.media_type === MediaType.PLAYLIST &&
+    "provider_mappings" in item &&
+    Array.isArray(item.provider_mappings) &&
+    item.provider_mappings.length > 0
+  ) {
+    return item.provider_mappings[0].provider_domain;
+  }
+  return getProviderIconDomain(item);
+};
+
+/**
+ * Provider domain for a browse entry that stands for a provider itself,
+ * undefined for anything else.
+ */
+export const getProviderRootDomain = function (
+  item: MediaItemType | ItemMapping | QueueItem | undefined,
+): string | undefined {
+  if (!item || !("media_type" in item)) return undefined;
+  if (item.media_type !== MediaType.FOLDER) return undefined;
+  // the ".." entry one level down has the same path, so item_id has to match too
+  if (item.item_id !== "root") return undefined;
+  return "path" in item && item.path.endsWith("://")
+    ? item.provider
+    : undefined;
+};
+
+// the provider a discography release carries while it is on none of the user's
+// music services
+export const MUSICBRAINZ_PROVIDER = "musicbrainz";
+
+/**
+ * Whether the item is a MusicBrainz entry rather than one of a music service.
+ *
+ * The server resolves such an item to the same album on one of the user's
+ * music services when it is opened or added to the library, so it can be shown
+ * and added but not played as it is.
+ */
+export const isMusicBrainzItem = function (
+  item: MediaItemType | ItemMapping,
+): boolean {
+  return item.provider === MUSICBRAINZ_PROVIDER;
+};
+
+export const itemIsAvailable = function (
+  item: MediaItemType | ItemMapping,
+): boolean {
+  if (item.media_type == MediaType.FOLDER) return true;
+  if (item.media_type == MediaType.COLLECTION && item.provider == "library")
+    return true;
+  if (
+    (item.media_type == MediaType.GENRE ||
+      item.media_type == MediaType.GENRE_ALIAS) &&
+    item.provider == "library"
+  )
+    return true;
+  if ("provider_mappings" in item && Array.isArray(item.provider_mappings)) {
+    for (const x of item.provider_mappings) {
+      if (x.available && api.providers[x.provider_instance]?.available)
+        return true;
+    }
+  } else if ("available" in item) return item.available as boolean;
+  return false;
+};
+
+export const getSourceName = function (player: Player) {
+  const source_id = player.active_source || "";
+  // source id is a queue id
+  if (source_id in api.queues) return api.queues[source_id].display_name;
+  for (const source of player.source_list) {
+    if (source_id == source.id) {
+      return source.name;
+    }
+  }
+  return source_id;
+};
+
+/**
+ * The queue playing on the given player, or undefined when it has none.
+ *
+ * A player either plays the queue of the source it is attached to, or its own
+ * queue when it has no source; an inactive own queue does not count.
+ *
+ * A player taken over by an external source is attached to no queue at all, so
+ * callers get undefined for it rather than an inactive queue. The queue that is
+ * returned reads `active` in every settled state, and reads inactive only while a
+ * handover back to it is still propagating.
+ */
+export function resolvePlayerQueue(player?: Player): PlayerQueue | undefined {
+  if (player?.active_source && player.active_source in api.queues) {
+    return api.queues[player.active_source];
+  }
+  if (
+    player &&
+    !player.active_source &&
+    player.player_id in api.queues &&
+    api.queues[player.player_id].active
+  ) {
+    return api.queues[player.player_id];
+  }
+  return undefined;
+}
+
+export const getCollectionMediaTypeFromItemId = function (itemId: string) {
+  // the item id is defined by the backend as "<MediaType>___<collection_name>"
+  const itemIdType = itemId.split("___", 1)[0];
+  return Object.values(MediaType).includes(itemIdType as MediaType)
+    ? (itemIdType as MediaType)
+    : MediaType.UNKNOWN;
+};
+
+/**
+ * Providers that a static library playlist can be migrated to: the builtin
+ * provider and streaming providers that can create playlists and edit
+ * their tracks. Returns an empty list for dynamic, non-library, or
+ * non-track playlists (migration only moves tracks). A provider the
+ * playlist is already mapped to is still included, so same-provider-instance
+ * copies are allowed.
+ */
+export const getPlaylistMigrationProviders = function (
+  playlist: Playlist,
+): ProviderInstance[] {
+  if (
+    playlist.is_dynamic ||
+    playlist.provider !== "library" ||
+    !playlist.supported_mediatypes.includes(MediaType.TRACK)
+  )
+    return [];
+  return Object.values(api.providers)
+    .filter(
+      (provider) =>
+        provider.available &&
+        provider.type === ProviderType.MUSIC &&
+        (provider.domain === "builtin" || provider.is_streaming_provider) &&
+        (provider.supported_features.includes(
+          ProviderFeature.PLAYLIST_CREATE,
+        ) ||
+          provider.supported_features.includes(
+            ProviderFeature.PLAYLIST_CREATE_TRACKS,
+          )) &&
+        provider.supported_features.includes(
+          ProviderFeature.PLAYLIST_TRACKS_EDIT,
+        ),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+};
+
+/**
+ * Generate a friendly device name, such as "Web (Chrome on Mac)".
+ */
+export function getDeviceName(): string {
+  const { browser, device, isPwa } = getDeviceInfo();
+  const appType = isPwa ? "PWA" : "Web";
+
+  return `${appType} (${browser} on ${device})`;
+}
+
+/**
+ * Detect the browser and device this app runs on, and whether it runs as an
+ * installed app (PWA).
+ * Uses User-Agent Client Hints API when available for more accurate detection.
+ */
+export function getDeviceInfo(): {
+  browser: string;
+  device: string;
+  isPwa: boolean;
+} {
+  const ua = navigator.userAgent;
+  let browser = "Browser";
+  let device = "";
+
+  // Detect browser
+  if (ua.includes("OPR/") || ua.includes("Opera/")) {
+    browser = "Opera";
+  } else if (ua.includes("Vivaldi/")) {
+    browser = "Vivaldi";
+  } else if (ua.includes("Brave/")) {
+    browser = "Brave";
+  } else if (ua.includes("SamsungBrowser/")) {
+    browser = "Samsung Browser";
+  } else if (ua.includes("Firefox/") || ua.includes("FxiOS/")) {
+    browser = "Firefox";
+  } else if (ua.includes("Edg/") || ua.includes("EdgiOS/")) {
+    browser = "Edge";
+  } else if (ua.includes("CriOS/")) {
+    browser = "Chrome";
+  } else if (ua.includes("Chrome/") && !ua.includes("Chromium/")) {
+    browser = "Chrome";
+  } else if (ua.includes("Safari/") && !ua.includes("Chrome/")) {
+    browser = "Safari";
+  }
+
+  // Try to detect specific device from user agent
+  // Check iOS devices first (contain "Mac OS X" in UA)
+  if (ua.includes("iPhone")) {
+    device = "iPhone";
+  } else if (ua.includes("iPad")) {
+    device = "iPad";
+  } else if (ua.includes("iPod")) {
+    device = "iPod";
+  }
+  // Android devices - try to extract model name
+  else if (ua.includes("Android")) {
+    const androidMatch = ua.match(/;\s*([^;)]+)\s*Build\//);
+    if (androidMatch && androidMatch[1]) {
+      const model = androidMatch[1].trim();
+      // Clean up common prefixes and provide friendly names
+      if (model.startsWith("SM-")) {
+        device = `Samsung ${model}`;
+      } else if (model.startsWith("Pixel")) {
+        device = `Google ${model}`;
+      } else if (model.startsWith("SAMSUNG") || model.startsWith("samsung")) {
+        device = model.replace(/SAMSUNG[- ]?/i, "Samsung ");
+      } else if (model.startsWith("Redmi") || model.startsWith("Mi ")) {
+        device = `Xiaomi ${model}`;
+      } else if (model.startsWith("ONEPLUS") || model.startsWith("OnePlus")) {
+        device = model.replace(/ONEPLUS/i, "OnePlus");
+      } else if (model.startsWith("moto") || model.startsWith("Moto")) {
+        device = `Motorola ${model}`;
+      } else if (model.startsWith("Nokia")) {
+        device = model;
+      } else if (model.startsWith("LG-") || model.startsWith("LM-")) {
+        device = `LG ${model}`;
+      } else if (model.startsWith("HUAWEI") || model.startsWith("VOG-")) {
+        device = model.replace(/HUAWEI[- ]?/i, "Huawei ");
+      } else if (model.startsWith("OPPO") || model.startsWith("CPH")) {
+        device = model.startsWith("CPH") ? `OPPO ${model}` : model;
+      } else if (model.startsWith("vivo") || model.startsWith("V")) {
+        device = model.startsWith("vivo") ? model : `vivo ${model}`;
+      } else if (model.startsWith("RMX")) {
+        device = `Realme ${model}`;
+      } else if (model !== "K" && model.length > 1) {
+        // Use model if it looks reasonable
+        device = model;
+      } else {
+        device = "Android";
+      }
+    } else {
+      // Check for tablets
+      if (
+        ua.includes("Tablet") ||
+        (ua.includes("Android") && !ua.includes("Mobile"))
+      ) {
+        device = "Android Tablet";
+      } else {
+        device = "Android";
+      }
+    }
+  }
+  // Desktop/other platforms
+  else if (ua.includes("Windows NT 10")) {
+    device = "Windows";
+  } else if (ua.includes("Windows NT 6.3")) {
+    device = "Windows 8.1";
+  } else if (ua.includes("Windows NT 6.2")) {
+    device = "Windows 8";
+  } else if (ua.includes("Windows NT 6.1")) {
+    device = "Windows 7";
+  } else if (ua.includes("Windows")) {
+    device = "Windows";
+  } else if (ua.includes("Mac OS X")) {
+    device = "Mac";
+  } else if (ua.includes("CrOS")) {
+    device = "ChromeOS";
+  } else if (ua.includes("Linux")) {
+    device = "Linux";
+  } else if (ua.includes("FreeBSD")) {
+    device = "FreeBSD";
+  }
+
+  // Use userAgentData if available for more accurate platform detection (Chromium browsers)
+  if ("userAgentData" in navigator && navigator.userAgentData) {
+    const uaData = navigator.userAgentData as NavigatorUAData;
+    if (uaData.platform) {
+      // Only override if we didn't get a specific device from UA parsing
+      if (!device || device === "Android" || device === "Android Tablet") {
+        if (uaData.platform === "Android") {
+          device = uaData.mobile ? "Android" : "Android Tablet";
+        } else if (uaData.platform === "Chrome OS") {
+          device = "ChromeOS";
+        }
+      }
+    }
+  }
+
+  if (!device) {
+    device = "Unknown Device";
+  }
+
+  // Check if running as installed PWA
+  const isPwa =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches ||
+    window.matchMedia("(display-mode: minimal-ui)").matches ||
+    ("standalone" in navigator &&
+      (navigator as Navigator & { standalone: boolean }).standalone);
+
+  return { browser, device, isPwa };
+}
+
+interface NavigatorUAData {
+  platform: string;
+  mobile: boolean;
+}

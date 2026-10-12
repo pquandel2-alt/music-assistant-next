@@ -1,0 +1,329 @@
+import { canUseQueueDj } from "@/helpers/ai_radio_access";
+import { trackAIRadioCache } from "@/helpers/ai_radio_events";
+import api from "@/plugins/api";
+import type {
+  AIRadioSection,
+  AIRadioSession,
+  AIRadioStation,
+  AIRadioStatus,
+  Playlist,
+} from "@/plugins/api/interfaces";
+import { authManager } from "@/plugins/auth";
+import { $t } from "@/plugins/i18n";
+import { store } from "@/plugins/store";
+import { ref, watch } from "vue";
+import { toast } from "vue-sonner";
+
+const PLAYLIST_PAGE_SIZE = 200;
+const PLAYLIST_FETCH_LIMIT = 5000;
+const NO_AI_PROVIDER_MARKER = /no ai provider/i;
+
+const shows = ref<AIRadioStation[]>([]);
+const sections = ref<AIRadioSection[]>([]);
+const sessions = ref<AIRadioSession[]>([]);
+const playlists = ref<Playlist[]>([]);
+
+const loadingShows = ref(false);
+const loadingSections = ref(false);
+const loadingStatus = ref(false);
+const loadingPlaylists = ref(false);
+const savingShow = ref(false);
+// Station id currently being deleted/started, so only that card reflects it.
+const deletingShowId = ref("");
+const startingShowId = ref("");
+const stoppingSessionId = ref("");
+
+// Set when a start attempt fails with a "No AI provider" error; drives the
+// gallery's persistent prereq banner (a toast alone isn't enough there).
+const noAiProviderAlert = ref(false);
+// Dynamic-mode runs fail asynchronously (the session starts fine and errors
+// during generation), so failed sessions must raise the banner too.
+const seenFailedSessionIds = new Set<string>();
+let statusLoadedOnce = false;
+
+let showSessionStatePrefetched = false;
+
+// Prefetch as soon as the provider is there, for the roles that get the queue DJ
+// menu, so it can resolve an on-air show's host from anywhere in the app, not
+// just this view.
+watch(
+  () => store.enabledPlugins.has("ai_radio") && canUseQueueDj(),
+  (ready) => {
+    // Session-scoped sessions lack the config scopes this needs and never open the queue DJ menu.
+    if (ready && authManager.guestSessionKind() === null)
+      prefetchShowSessionState();
+  },
+  { immediate: true },
+);
+
+interface StartShowOptions {
+  playerIdOverride?: string;
+  sourcePlaylistIdOverride?: string;
+  sourcePlaylistProviderOverride?: string;
+  dynamicSourcePlaytimeCapOverride?: number;
+}
+
+const sortByName = <T extends { name: string }>(items: T[]): T[] => {
+  return [...items].sort((a, b) => a.name.localeCompare(b.name));
+};
+
+const sortSessions = (items: AIRadioSession[]): AIRadioSession[] => {
+  return [...items].sort((a, b) => b.created_at.localeCompare(a.created_at));
+};
+
+async function loadShows(): Promise<AIRadioStation[]> {
+  loadingShows.value = true;
+  try {
+    const result = await api.sendCommand<AIRadioStation[]>(
+      "ai_radio/stations/list",
+    );
+    shows.value = sortByName(result || []);
+    trackAIRadioCache("stations_updated", loadShows);
+    return shows.value;
+  } finally {
+    loadingShows.value = false;
+  }
+}
+
+async function loadSections(): Promise<AIRadioSection[]> {
+  loadingSections.value = true;
+  try {
+    const result = await api.sendCommand<AIRadioSection[]>(
+      "ai_radio/sections/list",
+    );
+    sections.value = sortByName(result || []);
+    trackAIRadioCache("sections_updated", loadSections);
+    return sections.value;
+  } finally {
+    loadingSections.value = false;
+  }
+}
+
+async function loadPlaylists(): Promise<Playlist[]> {
+  loadingPlaylists.value = true;
+  try {
+    // Load in pages to avoid truncating larger libraries.
+    let offset = 0;
+    let hasMore = true;
+    const allItems: Playlist[] = [];
+    while (hasMore && offset < PLAYLIST_FETCH_LIMIT) {
+      const batch = await api.getLibraryPlaylists(
+        undefined,
+        undefined,
+        PLAYLIST_PAGE_SIZE,
+        offset,
+      );
+      allItems.push(...batch);
+      hasMore = batch.length === PLAYLIST_PAGE_SIZE;
+      offset += PLAYLIST_PAGE_SIZE;
+    }
+    if (hasMore) {
+      toast.warning(
+        $t("providers.ai_radio.toast.playlists_truncated", [
+          PLAYLIST_FETCH_LIMIT,
+        ]),
+      );
+    }
+    playlists.value = sortByName(allItems);
+    return playlists.value;
+  } finally {
+    loadingPlaylists.value = false;
+  }
+}
+
+/** Finds a loaded library playlist by provider+id, for artwork/name resolution on cards. */
+function playlistFor(provider: string, itemId: string): Playlist | undefined {
+  return playlists.value.find(
+    (playlist) => playlist.provider === provider && playlist.item_id === itemId,
+  );
+}
+
+async function getShow(stationId: string): Promise<AIRadioStation> {
+  return api.sendCommand<AIRadioStation>("ai_radio/stations/get", {
+    station_id: stationId,
+  });
+}
+
+async function saveShow(
+  station: AIRadioStation,
+  successMessage?: string,
+): Promise<AIRadioStation> {
+  savingShow.value = true;
+  try {
+    const saved = await api.sendCommand<AIRadioStation>(
+      "ai_radio/stations/save",
+      { station },
+    );
+    toast.success(
+      successMessage || $t("providers.ai_radio.toast.station_saved"),
+    );
+    await loadShows();
+    return saved;
+  } finally {
+    savingShow.value = false;
+  }
+}
+
+async function deleteShow(stationId: string): Promise<void> {
+  deletingShowId.value = stationId;
+  try {
+    await api.sendCommand("ai_radio/stations/delete", {
+      station_id: stationId,
+    });
+    toast.success($t("providers.ai_radio.toast.station_deleted"));
+    await loadShows();
+  } finally {
+    deletingShowId.value = "";
+  }
+}
+
+async function loadStatus(): Promise<AIRadioSession[]> {
+  loadingStatus.value = true;
+  try {
+    const result = await api.sendCommand<AIRadioStatus>("ai_radio/status");
+    sessions.value = sortSessions(result.sessions || []);
+    for (const session of sessions.value) {
+      if (
+        session.status !== "failed" ||
+        seenFailedSessionIds.has(session.session_id)
+      ) {
+        continue;
+      }
+      seenFailedSessionIds.add(session.session_id);
+      if (statusLoadedOnce) {
+        toast.error(
+          $t("providers.ai_radio.toast.session_failed", [
+            session.error || $t("providers.ai_radio.card.session_failed"),
+          ]),
+        );
+      }
+      reportStartError(session.error || "");
+    }
+    statusLoadedOnce = true;
+    trackAIRadioCache("sessions_updated", loadStatus);
+    return sessions.value;
+  } finally {
+    loadingStatus.value = false;
+  }
+}
+
+/**
+ * Warms the shows + sessions caches the queue DJ menu reads to resolve an
+ * on-air show's host. Without this, opening that menu outside the AI Radio
+ * page (which is what normally loads these) would see stale/empty caches.
+ */
+function prefetchShowSessionState(): void {
+  if (showSessionStatePrefetched) return;
+  showSessionStatePrefetched = true;
+  Promise.all([loadShows(), loadStatus()]).catch(() => {
+    // Best effort: allow a later availability flip to try again.
+    showSessionStatePrefetched = false;
+  });
+}
+
+async function startShow(
+  stationId: string,
+  overrides?: StartShowOptions,
+): Promise<AIRadioSession> {
+  startingShowId.value = stationId;
+  dismissNoAiProviderAlert();
+  try {
+    const args: Record<string, unknown> = {
+      station_id: stationId,
+    };
+    if (overrides?.playerIdOverride) {
+      args.player_id_override = overrides.playerIdOverride;
+    }
+    if (overrides?.sourcePlaylistIdOverride) {
+      args.source_playlist_id_override = overrides.sourcePlaylistIdOverride;
+    }
+    if (overrides?.sourcePlaylistProviderOverride) {
+      args.source_playlist_provider_override =
+        overrides.sourcePlaylistProviderOverride;
+    }
+    if (typeof overrides?.dynamicSourcePlaytimeCapOverride === "number") {
+      args.dynamic_source_playtime_cap_override =
+        overrides.dynamicSourcePlaytimeCapOverride;
+    }
+    const result = await api.sendCommand<AIRadioSession>(
+      "ai_radio/start",
+      args,
+    );
+    const updated = await loadStatus();
+    const current = updated.find(
+      (item) => item.session_id === result.session_id,
+    );
+    if (current?.status !== "failed") {
+      toast.success($t("providers.ai_radio.toast.live_starting"));
+    }
+    return current || result;
+  } finally {
+    startingShowId.value = "";
+  }
+}
+
+async function stopShow(sessionId: string): Promise<void> {
+  stoppingSessionId.value = sessionId;
+  try {
+    await api.sendCommand("ai_radio/stop", { session_id: sessionId });
+    toast.success($t("providers.ai_radio.toast.session_stopped"));
+    await loadStatus();
+  } catch (error) {
+    await loadStatus().catch(() => undefined);
+    throw error;
+  } finally {
+    stoppingSessionId.value = "";
+  }
+}
+
+/** Flags the prereq banner when a start attempt's error indicates no AI provider is configured. */
+function reportStartError(message: string): void {
+  if (NO_AI_PROVIDER_MARKER.test(message)) {
+    noAiProviderAlert.value = true;
+  }
+}
+
+function dismissNoAiProviderAlert(): void {
+  noAiProviderAlert.value = false;
+}
+
+/** The running session for a station, if any (drives a show card's "On air" state). */
+function runningSessionForStation(
+  stationId: string,
+): AIRadioSession | undefined {
+  return sessions.value.find(
+    (session) =>
+      session.station_id === stationId && session.status === "running",
+  );
+}
+
+export function useShows() {
+  return {
+    shows,
+    sections,
+    sessions,
+    playlists,
+    loadingShows,
+    loadingSections,
+    loadingStatus,
+    loadingPlaylists,
+    savingShow,
+    deletingShowId,
+    startingShowId,
+    stoppingSessionId,
+    noAiProviderAlert,
+    loadShows,
+    loadSections,
+    loadPlaylists,
+    playlistFor,
+    getShow,
+    saveShow,
+    deleteShow,
+    loadStatus,
+    startShow,
+    stopShow,
+    runningSessionForStation,
+    reportStartError,
+    dismissNoAiProviderAlert,
+  };
+}

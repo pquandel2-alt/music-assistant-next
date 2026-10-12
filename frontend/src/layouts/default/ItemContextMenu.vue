@@ -1,0 +1,1803 @@
+<!--
+  Global contextmenu for a (media) item.
+  Because this dialog can be called from various places throughout the app,
+  we steer its visibility through the centralized eventbus.
+-->
+<template>
+  <DropdownMenu :open="show" :modal="modal" @update:open="onOpenChange">
+    <DropdownMenuContent
+      data-item-context-menu
+      :reference="reference"
+      align="end"
+      :side-offset="0"
+      class="z-[999999] min-w-[300px] max-w-[350px] max-h-[85vh] overflow-y-auto"
+      @close-auto-focus="onCloseAutoFocus"
+    >
+      <!-- play menu header -->
+      <template v-if="showPlayMenuHeader">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger class="gap-3 py-2">
+            <PlayerIcon :icon="store.activePlayer?.icon" :size="32" />
+            <div class="flex flex-col">
+              <span>{{ $t("play_on") }}</span>
+              <span class="text-muted-foreground text-xs">{{
+                store.activePlayer
+                  ? getPlayerDisplayName(store.activePlayer)
+                  : $t("no_player")
+              }}</span>
+            </div>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent
+            align="start"
+            :align-offset="-5"
+            :side-offset="6"
+            class="max-h-[70vh] overflow-y-auto"
+          >
+            <DropdownMenuItem
+              v-for="player of playerSubItems"
+              :key="player.label"
+              @select="onSelect($event, player)"
+            >
+              <MenuItemIcon :icon="player.icon" />
+              <span class="flex-1 truncate min-w-0">{{ player.label }}</span>
+              <Check v-if="player.selected" class="ml-auto size-4" />
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSeparator />
+      </template>
+
+      <template v-for="menuItem of visibleItems" :key="menuItem.label">
+        <!-- custom inline control (e.g. a stepper); renders its own row and
+             manages its own interaction without closing the menu -->
+        <component
+          :is="menuItem.component"
+          v-if="menuItem.component"
+          v-bind="menuItem.componentProps"
+        />
+        <!-- item whose submenu popout is a custom control -->
+        <DropdownMenuSub v-else-if="menuItem.subComponent">
+          <DropdownMenuSubTrigger class="gap-3">
+            <MenuItemIcon :icon="menuItem.icon" />
+            <span class="flex-1 truncate min-w-0">{{
+              menuItemLabel(menuItem)
+            }}</span>
+          </DropdownMenuSubTrigger>
+          <!-- fixed width so popout content truncates on phones; flex column
+               so the component can keep a static header and scroll the rest.
+               capped at the popper's available height (not a viewport fraction)
+               so growing content scrolls instead of shifting the popout up -->
+          <DropdownMenuSubContent
+            align="start"
+            :align-offset="-5"
+            :side-offset="6"
+            class="max-h-[min(70vh,var(--reka-dropdown-menu-content-available-height))] w-[min(92vw,350px)] flex flex-col"
+          >
+            <component
+              :is="menuItem.subComponent"
+              v-bind="menuItem.componentProps"
+            />
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <!-- item with submenu -->
+        <DropdownMenuSub
+          v-else-if="menuItem.subItems && menuItem.subItems.length"
+        >
+          <DropdownMenuSubTrigger
+            :class="[
+              'gap-3',
+              { 'text-destructive': menuItem.color === 'error' },
+            ]"
+          >
+            <MenuItemIcon :icon="menuItem.icon" />
+            <span class="flex-1 truncate min-w-0">{{
+              menuItemLabel(menuItem)
+            }}</span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent
+            align="start"
+            :align-offset="-5"
+            :side-offset="6"
+            class="max-h-[70vh] overflow-y-auto"
+          >
+            <DropdownMenuItem
+              v-for="subMenuItem of menuItem.subItems.filter((x) => !x.hide)"
+              :key="subMenuItem.label"
+              :disabled="subMenuItem.disabled === true"
+              :variant="
+                subMenuItem.color === 'error' ? 'destructive' : 'default'
+              "
+              @select="onSelect($event, subMenuItem)"
+            >
+              <MenuItemIcon :icon="subMenuItem.icon" />
+              <span class="flex-1 truncate min-w-0">{{
+                menuItemLabel(subMenuItem)
+              }}</span>
+              <Check v-if="subMenuItem.selected" class="ml-auto size-4" />
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <!-- leaf item -->
+        <DropdownMenuItem
+          v-else
+          :disabled="menuItem.disabled === true"
+          :variant="menuItem.color === 'error' ? 'destructive' : 'default'"
+          @select="onSelect($event, menuItem)"
+        >
+          <MenuItemIcon :icon="menuItem.icon" />
+          <span class="flex-1 truncate min-w-0">{{
+            menuItemLabel(menuItem)
+          }}</span>
+          <Check v-if="menuItem.selected" class="ml-auto size-4" />
+        </DropdownMenuItem>
+      </template>
+    </DropdownMenuContent>
+  </DropdownMenu>
+</template>
+
+<script setup lang="ts">
+import PlayerIcon from "@/components/PlayerIcon.vue";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+} from "@/components/ui/dropdown-menu";
+import { getLucideIcon, PLAYER_ICON_FALLBACK } from "@/helpers/icon";
+import api from "@/plugins/api";
+import { ContextMenuDialogEvent, eventbus } from "@/plugins/eventbus";
+import { store } from "@/plugins/store";
+import { Check } from "@lucide/vue";
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { VIcon } from "vuetify/components";
+
+const show = ref<boolean>(false);
+const items = ref<ContextMenuItem[]>([]);
+const posX = ref(0);
+const posY = ref(0);
+const showPlayMenuHeader = ref<boolean>(false);
+
+const visibleItems = computed(() => items.value.filter((x) => !x.hide));
+
+const reference = computed(() => {
+  const rect = new DOMRect(posX.value, posY.value, 0, 0);
+  return { getBoundingClientRect: () => rect };
+});
+
+// a modal menu blocks the page behind it; the players menu keeps it clickable
+const modal = computed(() => !store.showPlayersMenu);
+
+const MenuItemIcon = (props: { icon?: string | Component; size?: number }) => {
+  if (!props.icon) return null;
+  return typeof props.icon === "string"
+    ? h(VIcon, {
+        icon: props.icon,
+        size: props.size ?? 20,
+        class: "shrink-0",
+      })
+    : h(props.icon, { class: "size-5 shrink-0 scale-90" });
+};
+
+const playerSubItems = computed<ContextMenuItem[]>(() => {
+  const sortedPlayers = Object.values(api.players)
+    .filter((x) => playerVisible(x))
+    .sort((a, b) =>
+      getPlayerDisplayName(a).toUpperCase() >
+      getPlayerDisplayName(b).toUpperCase()
+        ? 1
+        : -1,
+    );
+  return sortedPlayers.map((player) => ({
+    label: getPlayerDisplayName(player),
+    action: () => {
+      store.activePlayerId = player.player_id;
+    },
+    icon: getLucideIcon(player.icon) ?? getLucideIcon(PLAYER_ICON_FALLBACK),
+    selected: store.activePlayerId == player.player_id,
+    close_on_click: false,
+  }));
+});
+
+// the menu can be opened on top of another dialog that stays open behind it
+// (such as the search popup), so closing it restores the flag rather than
+// clearing it for the dialog underneath
+let dialogActiveBeforeOpen = false;
+
+// the menu opens without a trigger element, so on close focus goes back to
+// whatever held it when the menu opened. Only for keyboard users: a touch
+// long-press (or a click in Safari) leaves focus where it was, which may be an
+// unrelated input that would scroll the page or bring up the on-screen keyboard
+let focusBeforeOpen: HTMLElement | null = null;
+let usingKeyboard = false;
+
+onMounted(() => {
+  eventbus.on("contextmenu", async (evt: ContextMenuDialogEvent) => {
+    items.value = evt.items;
+    posX.value = evt.posX || 0;
+    posY.value = evt.posY || 0;
+    showPlayMenuHeader.value = evt.showPlayMenuHeader || false;
+    nextTick(() => {
+      if (!show.value) {
+        dialogActiveBeforeOpen = store.dialogActive;
+        focusBeforeOpen =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+      }
+      show.value = true;
+      store.dialogActive = true;
+    });
+  });
+  document.addEventListener("keydown", markKeyboardInteraction, true);
+  document.addEventListener("pointerdown", markPointerInteraction, true);
+  document.addEventListener("pointerdown", closeOnOutsidePointer, true);
+});
+
+onBeforeUnmount(() => {
+  eventbus.off("contextmenu");
+  document.removeEventListener("keydown", markKeyboardInteraction, true);
+  document.removeEventListener("pointerdown", markPointerInteraction, true);
+  document.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+});
+
+const onOpenChange = function (value: boolean) {
+  show.value = value;
+  // the dialog underneath may have closed on its own in the meantime, so
+  // only a flag that is still set is restored
+  store.dialogActive = value || (dialogActiveBeforeOpen && store.dialogActive);
+};
+
+const onCloseAutoFocus = function (event: Event) {
+  event.preventDefault();
+  const target = focusBeforeOpen;
+  focusBeforeOpen = null;
+  if (!usingKeyboard || !target) return;
+  // deferred like reka's own restore, so the closing interaction settles first
+  setTimeout(() => {
+    // an action may have moved focus on purpose (e.g. into a dialog)
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    if (target.isConnected) target.focus();
+  }, 0);
+};
+
+function closeOnOutsidePointer(event: PointerEvent) {
+  if (!show.value) return;
+  const target = event.target;
+  // Submenu popouts (and any Select a menu row may host) render outside
+  // [data-item-context-menu]; touching one to scroll it must not read as an
+  // outside press and close the menu.
+  if (
+    target instanceof Element &&
+    target.closest(
+      "[data-item-context-menu], [data-slot='dropdown-menu-sub-content'], [data-slot='select-content']",
+    )
+  ) {
+    return;
+  }
+
+  // consume the press so a dialog underneath (such as the search popup)
+  // does not treat it as an outside press and close as well
+  if (modal.value) event.stopPropagation();
+
+  show.value = false;
+  queueMicrotask(() => {
+    if (!show.value)
+      store.dialogActive = dialogActiveBeforeOpen && store.dialogActive;
+  });
+}
+
+function markKeyboardInteraction() {
+  usingKeyboard = true;
+}
+
+function markPointerInteraction() {
+  usingKeyboard = false;
+}
+
+const onSelect = function (evt: Event, menuItem: ContextMenuItem) {
+  if (menuItem.action) {
+    // actions may be async and are not awaited here; catch so a rejection
+    // surfaces in the console instead of as an unhandled promise rejection
+    Promise.resolve(menuItem.action()).catch((err) => {
+      console.error("[contextmenu] action '%s' failed", menuItem.label, err);
+    });
+  }
+  // Keep the menu open for multi-select style items (optimistic update).
+  if (menuItem.close_on_click === false) {
+    evt.preventDefault();
+    menuItem.selected = !menuItem.selected;
+    // Trigger reactivity by reassigning the array
+    items.value = [...items.value];
+  }
+};
+</script>
+
+<script lang="ts">
+// Helpers and utilities for Contextmenu items
+
+import router from "@/plugins/router";
+
+import {
+  getShortcutMoveAvailability,
+  isShortcutCapReached,
+  isShortcutItem,
+  isShortcutPinnedItem,
+  moveShortcutStandaloneItem,
+  pinShortcutStandalone,
+  unpinShortcutStandaloneItem,
+} from "@/composables/useShortcuts";
+import { runWithConcurrency } from "@/helpers/concurrency";
+import {
+  FAVORITABLE_MEDIA_TYPES,
+  favoriteState,
+  setFavoriteState,
+} from "@/helpers/favorites";
+import { genresShareTaxonomy } from "@/helpers/genreTaxonomy";
+import { backFromMediaDetails } from "@/helpers/navigation";
+import { getPlayerDisplayName, playerVisible } from "@/helpers/players";
+import { embeddedProviderDomain } from "@/helpers/provider_domain";
+import {
+  canAddToPlaylist,
+  canEditPlaylistItems,
+  canManagePlaylist,
+  canSharePlaylist,
+} from "@/helpers/playlist_access";
+import {
+  gotoRadio,
+  radioActionLabelKey,
+  radioRelevant,
+  radioSupported,
+} from "@/helpers/radio";
+import {
+  getPlaylistMigrationProviders,
+  isAudioSource,
+  isItemInLibrary,
+  isMusicBrainzItem,
+  itemIsAvailable,
+  itemSupportsPlayLog,
+} from "@/plugins/api/helpers";
+import {
+  Album,
+  BrowseFolder,
+  EventType,
+  Genre,
+  MediaItemType,
+  MediaItemTypeOrItemMapping,
+  MediaType,
+  Playlist,
+  PodcastEpisode,
+  ProviderFeature,
+  ProviderMapping,
+  QueueOption,
+  Radio,
+  Scope,
+  Track,
+} from "@/plugins/api/interfaces";
+import { authManager } from "@/plugins/auth";
+import { $t } from "@/plugins/i18n";
+import { toast } from "vue-sonner";
+
+import GenreIcon from "@/components/icons/GenreIcon.vue";
+import {
+  ArrowDown,
+  ArrowRightLeft,
+  ArrowUp,
+  Disc3,
+  Download,
+  Folder,
+  Heart,
+  History,
+  Image,
+  Info,
+  LibraryBig,
+  Link,
+  ListMusic,
+  ListPlus,
+  Merge,
+  MicVocal,
+  MinusCircle,
+  Orbit,
+  Pencil,
+  Pin,
+  PinOff,
+  PlayCircle,
+  PlusCircle,
+  RefreshCw,
+  RotateCcw,
+  Share2,
+  Shuffle,
+  SkipForward,
+  Sparkles,
+  ThumbsDown,
+  Trash2,
+} from "@lucide/vue";
+import type { Component } from "vue";
+
+// The item type lives in a plain .ts module (editor-friendly); re-exported
+// here for convenience since most consumers already import from this file.
+import {
+  menuItemLabel,
+  type ContextMenuItem,
+} from "@/helpers/context_menu_item";
+export type { ContextMenuItem } from "@/helpers/context_menu_item";
+
+export const showContextMenuForMediaItem = async function (
+  item: MediaItemTypeOrItemMapping | MediaItemTypeOrItemMapping[],
+  parentItem?: MediaItemType,
+  posX = 0,
+  posY = 0,
+  includePlayMenuItems = false,
+  showPlayMenuHeader = false,
+  sortBy?: string,
+  options?: ContextMenuOptions,
+) {
+  // show ContextMenu for given MediaItem(s)
+  const mediaItems: MediaItemTypeOrItemMapping[] = Array.isArray(item)
+    ? item
+    : [item];
+
+  // return early if we dont have any items
+  if (mediaItems.length == 0) return;
+
+  if (
+    mediaItems[0].media_type == MediaType.FOLDER &&
+    mediaItems[0].name == ".."
+  ) {
+    return;
+  }
+
+  const menuTargets = await withFullItemDetails(mediaItems);
+
+  const contextMenuItems = await getContextMenuItems(
+    menuTargets,
+    parentItem,
+    options,
+  );
+
+  let menuItems: ContextMenuItem[] = [];
+
+  // the play section, its player header included, is for an item that can be
+  // played at all
+  const withPlayMenu =
+    includePlayMenuItems &&
+    menuTargets[0].is_playable &&
+    itemIsAvailable(menuTargets[0]);
+  if (withPlayMenu) {
+    // Play menu items first, then context items
+    menuItems = await getPlaybackContextMenuItems(
+      menuTargets,
+      parentItem,
+      sortBy,
+    );
+    menuItems.push(...contextMenuItems);
+  } else {
+    // No play items - just show context menu items directly
+    menuItems = contextMenuItems;
+  }
+
+  if (menuItems.length == 0) return;
+
+  // open the contextmenu by emitting the event
+  eventbus.emit("contextmenu", {
+    items: menuItems,
+    posX: posX,
+    posY: posY,
+    showPlayMenuHeader: showPlayMenuHeader && withPlayMenu,
+  });
+};
+
+const queueOptionIconMap = {
+  [QueueOption.NEXT]: SkipForward,
+  [QueueOption.ADD]: ListPlus,
+  [QueueOption.REPLACE]: PlayCircle,
+  [QueueOption.REPLACE_NEXT]: SkipForward,
+  [QueueOption.PLAY]: PlayCircle,
+};
+
+export const showPlayMenuForMediaItem = async function (
+  item: MediaItemTypeOrItemMapping | MediaItemTypeOrItemMapping[],
+  parentItem?: MediaItemType,
+  posX = 0,
+  posY = 0,
+) {
+  // open the play menu by emitting the event
+
+  const mediaItems: MediaItemTypeOrItemMapping[] = Array.isArray(item)
+    ? item
+    : [item];
+  if (mediaItems.length == 0) return;
+  // a MusicBrainz release in the selection has nothing to play
+  const playableItems = mediaItems.filter(
+    (x) => x.is_playable && !isMusicBrainzItem(x),
+  );
+  if (playableItems.length == 0) return;
+  const firstItem = playableItems[0];
+
+  let playMenuItems: ContextMenuItem[] = [];
+  // an episode played with its podcast as the parent can play on through the
+  // podcast from there, which the enqueue options below cannot express
+  if (
+    playableItems.length == 1 &&
+    parentItem?.media_type == MediaType.PODCAST &&
+    parentItem.uri != firstItem.uri
+  ) {
+    playMenuItems.push(playPodcastFromHereMenuItem(firstItem, parentItem));
+  }
+  const defaultEnqueueOption = await getDefaultEnqueueOption(firstItem);
+  if (isAudioSource(firstItem)) {
+    playMenuItems.push(
+      startAudioSourceMenuItem(playableItems, defaultEnqueueOption),
+    );
+  } else {
+    playMenuItems.push(
+      ...buildEnqueueMenuItems(playableItems, defaultEnqueueOption),
+    );
+  }
+  // Starting the media shuffled is its own action rather than a state indicator:
+  // the queue's shuffle flag says nothing about what the media about to be started
+  // will do, but an explicit request is always honoured.
+  if (canPlayShuffled(playableItems)) {
+    playMenuItems.push({
+      label: "play_shuffled",
+      labelArgs: [],
+      action: () => {
+        api.playMedia(
+          playableItems.map((x) => x.uri),
+          QueueOption.REPLACE,
+          { shuffle: true },
+        );
+      },
+      icon: Shuffle,
+      disabled: !store.activePlayer,
+    });
+  }
+
+  if (playMenuItems.length == 0) playMenuItems = [];
+
+  eventbus.emit("contextmenu", {
+    items: playMenuItems,
+    posX: posX,
+    posY: posY,
+    showPlayMenuHeader: true,
+  });
+};
+
+export interface ContextMenuOptions {
+  // true when the menu is opened from the sidebar shortcuts list,
+  // enabling actions that only make sense there (e.g. move up/down).
+  shortcutContext?: boolean;
+}
+
+export const getContextMenuItems = async function (
+  items: MediaItemTypeOrItemMapping[],
+  parentItem?: MediaItemType,
+  options?: ContextMenuOptions,
+) {
+  const contextMenuItems: ContextMenuItem[] = [];
+  if (items.length == 0) {
+    return contextMenuItems;
+  }
+
+  const firstItem = items[0];
+  const managesLibrary = authManager.hasScope(Scope.LIBRARY_MANAGE);
+  // favorites, library membership, playlists and played state change the library
+  const canEditLibrary = authManager.hasScope(Scope.LIBRARY_WRITE);
+
+  // show info
+  if (
+    items.length === 1 &&
+    firstItem !== parentItem &&
+    [
+      MediaType.ALBUM,
+      MediaType.ARTIST,
+      MediaType.AUDIOBOOK,
+      MediaType.GENRE,
+      MediaType.PLAYLIST,
+      MediaType.PODCAST,
+      MediaType.PODCAST_EPISODE,
+      MediaType.TRACK,
+    ].includes(items[0].media_type) &&
+    (itemIsAvailable(items[0]) || isMusicBrainzItem(items[0]))
+  ) {
+    contextMenuItems.push({
+      label: "show_info",
+      labelArgs: [],
+      action: () => {
+        router.push({
+          name: firstItem.media_type,
+          params: {
+            itemId: firstItem.item_id,
+            provider: firstItem.provider,
+          },
+          query: {
+            album: "album" in items[0] ? (items[0].album as Album)?.uri : "",
+          },
+        });
+      },
+      icon: Info,
+    });
+  }
+
+  // creates an AI Radio show from the playlist, which takes config.providers.write
+  if (
+    items.length === 1 &&
+    firstItem.media_type === MediaType.PLAYLIST &&
+    store.enabledPlugins.has("ai_radio") &&
+    authManager.hasScope(Scope.CONFIG_PROVIDERS_WRITE)
+  ) {
+    contextMenuItems.push({
+      label: "providers.ai_radio.context.run_with",
+      labelArgs: [],
+      action: () => {
+        router.push({
+          name: "ai-radio",
+          query: {
+            source_playlist_id: firstItem.item_id,
+            source_playlist_provider: firstItem.provider,
+            source_playlist_name: firstItem.name,
+          },
+        });
+      },
+      icon: Sparkles,
+    });
+  }
+
+  // browse folder
+  if (
+    items.length === 1 &&
+    items[0] !== parentItem &&
+    items[0].media_type == MediaType.FOLDER &&
+    itemIsAvailable(items[0])
+  ) {
+    contextMenuItems.push({
+      label: "browse",
+      labelArgs: [],
+      action: () => {
+        router.push({
+          name: "browse",
+          query: {
+            path: (items[0] as BrowseFolder).path,
+          },
+        });
+      },
+      icon: Folder,
+    });
+  }
+
+  // go to artist(s)
+  if (
+    items.length === 1 &&
+    itemIsAvailable(items[0]) &&
+    "artists" in items[0] &&
+    (items[0] as Track | Album).artists.length === 1
+  ) {
+    for (const artist of (items[0] as Track).artists) {
+      contextMenuItems.push({
+        label: "goto_artist",
+        labelArgs: [artist.name],
+        action: () => {
+          router.push({
+            name: "artist",
+            params: {
+              itemId: artist.item_id,
+              provider: artist.provider,
+            },
+          });
+        },
+        icon: MicVocal,
+      });
+    }
+  }
+  // go to album
+  const trackAlbum =
+    items.length === 1 && itemIsAvailable(items[0]) && "album" in items[0]
+      ? (items[0] as Track).album
+      : null;
+  if (trackAlbum) {
+    contextMenuItems.push({
+      label: "goto_album",
+      labelArgs: [trackAlbum.name],
+      action: () => {
+        router.push({
+          name: "album",
+          params: {
+            itemId: trackAlbum.item_id,
+            provider: trackAlbum.provider,
+          },
+        });
+      },
+      icon: Disc3,
+    });
+  }
+
+  // go to <type> radio (a dynamic playlist generated from this item as the
+  // seed); shown for radio-capable types, disabled when one can't be generated
+  if (
+    items.length === 1 &&
+    radioRelevant(firstItem) &&
+    itemIsAvailable(firstItem)
+  ) {
+    contextMenuItems.push({
+      label: radioActionLabelKey(firstItem),
+      labelArgs: [],
+      action: () => gotoRadio(firstItem),
+      icon: Orbit,
+      disabled: !radioSupported(firstItem),
+    });
+  }
+
+  // Library membership and favorites are keyed by the library item id,
+  // which provider items and item mappings do not carry, so resolve the
+  // counterpart the library holds. Library rows are verified too since a
+  // row can outlive its item (a list kept open, a cached search result).
+  // A MusicBrainz release is skipped: the server hands back the library album
+  // for a release that is in the library, so this one is outside it.
+  let libraryItem: MediaItemType | undefined;
+  if (
+    !isMusicBrainzItem(firstItem) &&
+    [
+      MediaType.ALBUM,
+      MediaType.ARTIST,
+      MediaType.AUDIOBOOK,
+      MediaType.GENRE,
+      MediaType.PLAYLIST,
+      MediaType.PODCAST,
+      MediaType.RADIO,
+      MediaType.TRACK,
+    ].includes(firstItem.media_type)
+  ) {
+    // a failed lookup still opens the menu, on the item's own claims
+    libraryItem =
+      (await api
+        .getLibraryItem(
+          firstItem.media_type,
+          firstItem.item_id,
+          firstItem.provider,
+        )
+        .catch((err) => {
+          console.error(
+            "[ItemContextMenu] library lookup failed for %s",
+            firstItem.uri,
+            err,
+          );
+          return null;
+        })) ?? undefined;
+  }
+  const resolvedItem = libraryItem ?? firstItem;
+
+  // Only the first item of a selection is resolved, so a single item acts
+  // on its library counterpart while a multi-selection keeps its own
+  // identity.
+  // (a MusicBrainz release has no library row to act on)
+  const actionTargets =
+    items.length === 1
+      ? [resolvedItem]
+      : items.filter((item) => !isMusicBrainzItem(item));
+  // a library row alone is not membership, since the backend also keeps
+  // rows for relatives of saved items, so the resolved row is checked too
+  const inLibrary =
+    items.length === 1
+      ? libraryItem !== undefined && isItemInLibrary(libraryItem)
+      : isItemInLibrary(resolvedItem);
+
+  // add to library (genres are excluded: they are managed via the dedicated
+  // add-genre dialog and delete/merge actions, not generic library membership)
+  if (
+    !inLibrary &&
+    canEditLibrary &&
+    [
+      MediaType.ALBUM,
+      MediaType.ARTIST,
+      MediaType.AUDIOBOOK,
+      MediaType.PLAYLIST,
+      MediaType.PODCAST,
+      MediaType.RADIO,
+      MediaType.TRACK,
+    ].includes(resolvedItem.media_type) &&
+    (itemIsAvailable(resolvedItem) || isMusicBrainzItem(resolvedItem))
+  ) {
+    contextMenuItems.push({
+      label: "add_library",
+      labelArgs: [],
+      action: () => {
+        for (const item of items) {
+          // a release none of the music services has is refused with a toast
+          api.addItemToLibrary(addableItem(item)).catch(() => undefined);
+          // optimistically flag the mappings so the derived state re-evaluates
+          if ("provider_mappings" in item)
+            item.provider_mappings.forEach((pm) => (pm.in_library = true));
+        }
+        // Clear the multi-select after action
+        eventbus.emit("clearSelection");
+      },
+      icon: LibraryBig,
+    });
+  }
+  // remove from library (a personal playlist only by whoever manages it)
+  const managesSelectedPlaylists = items.every(
+    (item) =>
+      item.media_type !== MediaType.PLAYLIST ||
+      !("access" in item) ||
+      canManagePlaylist(item, store.currentUser, managesLibrary),
+  );
+  if (
+    inLibrary &&
+    canEditLibrary &&
+    managesSelectedPlaylists &&
+    [
+      MediaType.ALBUM,
+      MediaType.ARTIST,
+      MediaType.AUDIOBOOK,
+      MediaType.PLAYLIST,
+      MediaType.PODCAST,
+      MediaType.RADIO,
+      MediaType.TRACK,
+    ].includes(resolvedItem.media_type)
+  ) {
+    contextMenuItems.push({
+      label: "remove_library",
+      labelArgs: [],
+      action: () => {
+        eventbus.emit("deleteConfirmationDialog", {
+          title: $t("remove_library"),
+          message: $t("confirm_library_remove"),
+          confirmLabel: $t("remove"),
+          onConfirm: () => {
+            for (const target of actionTargets) {
+              api.removeItemFromLibrary(target.media_type, target.item_id);
+            }
+            for (const item of items) {
+              // optimistically clear membership so the derived state re-evaluates;
+              // favorite implies membership, so it must clear too
+              setFavoriteState(item, null);
+              if ("provider_mappings" in item)
+                item.provider_mappings.forEach((pm) => (pm.in_library = false));
+            }
+            // library ids restart per media type, so the type has to match too
+            if (
+              resolvedItem.item_id == parentItem?.item_id &&
+              resolvedItem.media_type == parentItem.media_type
+            )
+              backFromMediaDetails(router);
+            // Clear the multi-select after action
+            eventbus.emit("clearSelection");
+          },
+        });
+      },
+      icon: LibraryBig,
+    });
+  }
+  // Favorites handling - supports mixed states like played/unplayed
+  if (canEditLibrary && actionTargets.length > 0) {
+    const favoritableItems = actionTargets.filter(
+      (item) =>
+        FAVORITABLE_MEDIA_TYPES.has(item.media_type) && itemIsAvailable(item),
+    );
+
+    // a favorite belongs to the library item, so a single item follows its
+    // resolved membership while a multi selection reads each item's own flag;
+    // a dislike carries no membership implication of its own, so the state
+    // alone decides it
+    const isFavorite = (item: MediaItemTypeOrItemMapping) =>
+      favoriteState(item) === true && (items.length > 1 || inLibrary);
+    const isDisliked = (item: MediaItemTypeOrItemMapping) =>
+      favoriteState(item) === false;
+
+    // the actions run on the library copy while the next menu is built from
+    // the item the caller holds, so its state has to follow (a MusicBrainz
+    // release in the selection was not acted on)
+    const markFavorite = (favorite: boolean | null) => {
+      for (const item of items) {
+        if (!isMusicBrainzItem(item)) setFavoriteState(item, favorite);
+      }
+    };
+
+    if (favoritableItems.length > 0) {
+      const allFavorited = favoritableItems.every(isFavorite);
+      const allNotFavorited = !favoritableItems.some(isFavorite);
+
+      // If all items are favorited, show "remove from favorites"
+      if (allFavorited) {
+        contextMenuItems.push({
+          label: "favorites_remove",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems) {
+              api.removeItemFromFavorites(item.media_type, item.item_id);
+            }
+            markFavorite(null);
+            // Clear the multi-select after action
+            eventbus.emit("clearSelection");
+          },
+          icon: Heart,
+        });
+      }
+      // If all items are not favorited, show "add to favorites"
+      else if (allNotFavorited) {
+        contextMenuItems.push({
+          label: "favorites_add",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems) {
+              api.addItemToFavorites(addableItem(item));
+            }
+            markFavorite(true);
+            // Clear the multi-select after action
+            eventbus.emit("clearSelection");
+          },
+          icon: Heart,
+        });
+      }
+      // If mixed state, show both options
+      else {
+        contextMenuItems.push({
+          label: "favorites_add",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems.filter(
+              (item) => !isFavorite(item),
+            )) {
+              api.addItemToFavorites(addableItem(item));
+              setFavoriteState(item, true);
+            }
+            // Clear the multi-select after action
+            eventbus.emit("clearSelection");
+          },
+          icon: Heart,
+        });
+
+        contextMenuItems.push({
+          label: "favorites_remove",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems.filter(isFavorite)) {
+              api.removeItemFromFavorites(item.media_type, item.item_id);
+              setFavoriteState(item, null);
+            }
+            // Clear the multi-select after action
+            eventbus.emit("clearSelection");
+          },
+          icon: Heart,
+        });
+      }
+
+      // A dislike is a state of its own, so it gets its own pair of entries:
+      // the heart only ever says "liked", and clearing a dislike is not the
+      // same action as removing a favorite.
+      const allDisliked = favoritableItems.every(isDisliked);
+      const noneDisliked = !favoritableItems.some(isDisliked);
+
+      if (allDisliked) {
+        contextMenuItems.push({
+          label: "favorites_dislike_remove",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems) {
+              api.removeItemFromFavorites(item.media_type, item.item_id);
+            }
+            markFavorite(null);
+            eventbus.emit("clearSelection");
+          },
+          icon: ThumbsDown,
+        });
+      } else if (noneDisliked) {
+        contextMenuItems.push({
+          label: "favorites_dislike",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems) {
+              api.setFavorite(addableItem(item), false);
+            }
+            markFavorite(false);
+            eventbus.emit("clearSelection");
+          },
+          icon: ThumbsDown,
+        });
+      } else {
+        // mixed selection: both, each acting on the items it applies to
+        contextMenuItems.push({
+          label: "favorites_dislike",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems.filter(
+              (item) => !isDisliked(item),
+            )) {
+              api.setFavorite(addableItem(item), false);
+              setFavoriteState(item, false);
+            }
+            eventbus.emit("clearSelection");
+          },
+          icon: ThumbsDown,
+        });
+
+        contextMenuItems.push({
+          label: "favorites_dislike_remove",
+          labelArgs: [],
+          action: () => {
+            for (const item of favoritableItems.filter(isDisliked)) {
+              api.removeItemFromFavorites(item.media_type, item.item_id);
+              setFavoriteState(item, null);
+            }
+            eventbus.emit("clearSelection");
+          },
+          icon: ThumbsDown,
+        });
+      }
+    }
+  }
+
+  // remove from playlist (playlist tracks, radio, podcast, podcast episode, and audiobook items)
+  if (
+    canEditLibrary &&
+    parentItem &&
+    parentItem.media_type === MediaType.PLAYLIST
+  ) {
+    const playlist = parentItem as Playlist;
+    if (
+      (firstItem.media_type === MediaType.TRACK ||
+        firstItem.media_type === MediaType.RADIO ||
+        firstItem.media_type === MediaType.PODCAST_EPISODE ||
+        firstItem.media_type === MediaType.AUDIOBOOK) &&
+      canEditPlaylistItems(playlist, store.currentUser, managesLibrary)
+    ) {
+      contextMenuItems.push({
+        label: "remove_playlist",
+        labelArgs: [],
+        action: () => {
+          api.removePlaylistTracks(
+            playlist.item_id,
+            items.map((x) => ("position" in x ? x.position : 0) as number),
+          );
+        },
+        icon: MinusCircle,
+      });
+    }
+  }
+  // add to playlist action (an item nothing can play has no place in one)
+  if (
+    canEditLibrary &&
+    canAddToPlaylist(firstItem) &&
+    itemIsAvailable(firstItem)
+  ) {
+    contextMenuItems.push({
+      label: "add_playlist",
+      labelArgs: [],
+      action: () => {
+        eventbus.emit("playlistdialog", {
+          items: items.filter(itemIsAvailable) as MediaItemType[],
+          parentItem: parentItem,
+        });
+      },
+      icon: PlusCircle,
+    });
+  }
+
+  const playLogItem = items.length === 1 ? items[0] : undefined;
+  if (canEditLibrary && itemSupportsPlayLog(playLogItem)) {
+    const item = playLogItem;
+    // mark played: anything not yet fully played, including in-progress items
+    if (!item.fully_played) {
+      contextMenuItems.push({
+        label: "mark_played",
+        icon: History,
+        action: async () => {
+          await api.markItemPlayed(item, true);
+        },
+      });
+    }
+    // mark unplayed: fully played or in-progress items
+    if (item.fully_played || item.resume_position_ms) {
+      contextMenuItems.push({
+        label: "mark_unplayed",
+        icon: History,
+        action: async () => {
+          await api.markItemUnPlayed(item);
+        },
+      });
+      // play from beginning (podcast episode with saved progress)
+      if (item.media_type === MediaType.PODCAST_EPISODE) {
+        contextMenuItems.push({
+          label: "play_from_beginning",
+          icon: RotateCcw,
+          action: () => {
+            api.playMedia(item.uri, QueueOption.PLAY, {
+              start_from_beginning: true,
+            });
+          },
+          disabled: !store.activePlayer,
+        });
+      }
+    }
+  }
+
+  // update metadata
+  // podcast episodes are never stored in the library, so there is nothing to write to
+  if (
+    managesLibrary &&
+    items.length === 1 &&
+    items[0] == parentItem &&
+    ![MediaType.COLLECTION, MediaType.PODCAST_EPISODE].includes(
+      items[0].media_type,
+    )
+  ) {
+    contextMenuItems.push({
+      label: "update_metadata",
+      labelArgs: [],
+      action: async () => {
+        const updatedInfo = await api.updateMetadata(items[0], true);
+        if (updatedInfo) {
+          Object.assign(items[0], updatedInfo);
+        }
+      },
+      icon: Image,
+    });
+  }
+  // edit item (for builtin provider items that support editing)
+  if (
+    items.length === 1 &&
+    items[0] == parentItem &&
+    items[0].provider === "library" &&
+    "provider_mappings" in items[0] &&
+    [MediaType.RADIO, MediaType.TRACK, MediaType.PLAYLIST].includes(
+      items[0].media_type,
+    )
+  ) {
+    const item = items[0] as Radio | Track | Playlist;
+    const hasBuiltinProvider = item.provider_mappings.some(
+      (pm) => pm.provider_domain === "builtin",
+    );
+    const builtinProvider = api.getProvider("builtin");
+    const featureMap: Record<string, ProviderFeature> = {
+      [MediaType.RADIO]: ProviderFeature.LIBRARY_RADIOS_EDIT,
+      [MediaType.TRACK]: ProviderFeature.LIBRARY_TRACKS_EDIT,
+      [MediaType.PLAYLIST]: ProviderFeature.LIBRARY_PLAYLISTS_EDIT,
+    };
+    const labelMap: Record<string, string> = {
+      [MediaType.RADIO]: "edit_radio",
+      [MediaType.TRACK]: "edit_track",
+      [MediaType.PLAYLIST]: "edit_playlist",
+    };
+    const supportsEdit = builtinProvider?.supported_features.includes(
+      featureMap[item.media_type],
+    );
+    // For playlists, require library.write and check the is_editable flag
+    // (builtin special playlists are not editable) plus that the user manages
+    // the playlist (a personal one is only edited by its owner);
+    // radios and tracks are edited by a library manager
+    const canEditItem =
+      item.media_type === MediaType.PLAYLIST
+        ? canEditLibrary &&
+          (item as Playlist).is_editable !== false &&
+          canManagePlaylist(item as Playlist, store.currentUser, managesLibrary)
+        : managesLibrary;
+    if (hasBuiltinProvider && supportsEdit && canEditItem) {
+      contextMenuItems.push({
+        label: labelMap[item.media_type],
+        labelArgs: [],
+        action: () => {
+          eventbus.emit("editItemDialog", item);
+        },
+        icon: Pencil,
+      });
+    }
+  }
+  // refresh item: a library manager refreshes the page's own item; an item
+  // none of the music services has any more is looked up on them again, which
+  // a library writer may do too. podcast episodes are left out: they are
+  // fetched from the provider on every view, so there is no stored copy that
+  // could go stale
+  const unavailable = items.length === 1 && !itemIsAvailable(items[0]);
+  const canFindOnMusicServices = unavailable && canEditLibrary;
+  if (
+    items.length === 1 &&
+    ![MediaType.COLLECTION, MediaType.PODCAST_EPISODE].includes(
+      items[0].media_type,
+    ) &&
+    !isMusicBrainzItem(items[0]) &&
+    ((managesLibrary && items[0] == parentItem) || canFindOnMusicServices)
+  ) {
+    contextMenuItems.push({
+      label: unavailable ? "find_on_music_services" : "refresh_item",
+      labelArgs: [],
+      action: async () => {
+        const updatedInfo = await api.refreshItem(items[0]);
+        if (updatedInfo) {
+          // Emit synthetic MEDIA_ITEM_UPDATED event to trigger UI refresh
+          // This ensures child components (like track listings) also refresh
+          api.signalEvent({
+            event: EventType.MEDIA_ITEM_UPDATED,
+            object_id: updatedInfo.uri,
+            data: updatedInfo,
+          });
+        }
+      },
+      icon: RefreshCw,
+    });
+  }
+  // export playlist
+  if (
+    items.length === 1 &&
+    items[0] == parentItem &&
+    items[0].media_type === MediaType.PLAYLIST &&
+    items[0].provider === "library"
+  ) {
+    contextMenuItems.push({
+      label: "export_playlist",
+      labelArgs: [],
+      action: async () => {
+        const playlist = items[0] as Playlist;
+        const m3uData = await api.exportPlaylist(playlist.item_id);
+        const blob = new Blob([m3uData], { type: "audio/x-mpegurl" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `${playlist.name.replace(/[\\/:*?"<>|]/g, "_")}.m3u8`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      },
+      icon: Download,
+    });
+  }
+  // migrate playlist (static library playlists only, to a provider that
+  // supports creating playlists and editing their tracks)
+  if (
+    canEditLibrary &&
+    items.length === 1 &&
+    items[0] == parentItem &&
+    items[0].media_type === MediaType.PLAYLIST &&
+    items[0].provider === "library" &&
+    !(items[0] as Playlist).is_dynamic
+  ) {
+    const playlist = items[0] as Playlist;
+    if (getPlaylistMigrationProviders(playlist).length > 0) {
+      contextMenuItems.push({
+        label: "migrate_playlist.action",
+        labelArgs: [],
+        action: () => {
+          eventbus.emit("migratePlaylistDialog", { playlist });
+        },
+        icon: ArrowRightLeft,
+      });
+    }
+  }
+  // share playlist (a Music Assistant playlist the user owns or manages)
+  if (
+    items.length === 1 &&
+    items[0].media_type === MediaType.PLAYLIST &&
+    "provider_mappings" in items[0]
+  ) {
+    const playlist = items[0] as Playlist;
+    if (
+      canEditLibrary &&
+      canSharePlaylist(playlist, store.currentUser, managesLibrary)
+    ) {
+      contextMenuItems.push({
+        label: "share_playlist",
+        labelArgs: [],
+        action: () => {
+          eventbus.emit("playlistAccessDialog", { playlist });
+        },
+        icon: Share2,
+      });
+    }
+  }
+  // pin / unpin shortcut in sidebar (playlist, artist, album, track, radio, podcast, audiobook, genre)
+  if (items.length === 1 && isShortcutItem(items[0]) && !!items[0].uri) {
+    const shortcutItem = items[0];
+    if (isShortcutPinnedItem(shortcutItem)) {
+      // move up/down only make sense when the menu is opened on the
+      // sidebar shortcuts list itself
+      if (options?.shortcutContext) {
+        const { canMoveUp, canMoveDown } =
+          getShortcutMoveAvailability(shortcutItem);
+        contextMenuItems.push({
+          label: "queue_move_up",
+          labelArgs: [],
+          action: () => moveShortcutStandaloneItem(shortcutItem, "up"),
+          icon: ArrowUp,
+          disabled: !canMoveUp,
+        });
+        contextMenuItems.push({
+          label: "queue_move_down",
+          labelArgs: [],
+          action: () => moveShortcutStandaloneItem(shortcutItem, "down"),
+          icon: ArrowDown,
+          disabled: !canMoveDown,
+        });
+      }
+      contextMenuItems.push({
+        label: "shortcut.remove_from",
+        labelArgs: [],
+        action: () => unpinShortcutStandaloneItem(shortcutItem),
+        icon: PinOff,
+      });
+    } else if (itemIsAvailable(shortcutItem)) {
+      contextMenuItems.push({
+        label: "shortcut.add_to",
+        labelArgs: [],
+        action: () => pinShortcutStandalone(shortcutItem),
+        icon: Pin,
+        disabled: isShortcutCapReached(),
+      });
+    }
+  }
+  // map to main item (add provider mapping)
+  if (
+    managesLibrary &&
+    items.length === 1 &&
+    parentItem &&
+    parentItem.provider == "library" &&
+    parentItem.item_id != resolvedItem.item_id &&
+    parentItem.media_type == resolvedItem.media_type
+  ) {
+    const mapping: Pick<
+      ProviderMapping,
+      "provider_instance" | "provider_domain" | "item_id" | "available"
+    > =
+      "provider_mappings" in items[0]
+        ? items[0].provider_mappings[0]
+        : {
+            provider_instance: resolvedItem.provider,
+            provider_domain:
+              api.providers[resolvedItem.provider]?.domain ||
+              embeddedProviderDomain(resolvedItem.provider),
+            item_id: resolvedItem.item_id,
+            available: true,
+          };
+    contextMenuItems.push({
+      label: "map_provider_mapping",
+      labelArgs: [],
+      action: async () => {
+        api.sendCommand("music/add_provider_mapping", {
+          media_type: items[0].media_type,
+          db_id: parentItem.item_id,
+          mapping: mapping,
+        });
+      },
+      icon: Link,
+    });
+  }
+  // link to genre (library items only, non-genre)
+  if (
+    managesLibrary &&
+    items.every(
+      (i) =>
+        i.media_type !== MediaType.GENRE &&
+        i.media_type !== MediaType.COLLECTION &&
+        i.provider === "library",
+    )
+  ) {
+    contextMenuItems.push({
+      label: "link_to_genre",
+      labelArgs: [],
+      action: () => {
+        eventbus.emit("linkGenreDialog", {
+          items: items as MediaItemType[],
+        });
+        eventbus.emit("clearSelection");
+      },
+      icon: GenreIcon,
+    });
+  }
+  // merge genres (admin only, all items must be library genres of the same taxonomy)
+  if (
+    items.every(
+      (i) => i.media_type === MediaType.GENRE && i.provider === "library",
+    ) &&
+    genresShareTaxonomy(items.map((i) => (i as Genre).content_type)) &&
+    managesLibrary
+  ) {
+    contextMenuItems.push({
+      label: "merge_into",
+      labelArgs: [],
+      action: () => {
+        eventbus.emit("mergeGenreDialog", {
+          genreIds: items.map((i) => i.item_id),
+          genreNames: items.map((i) => i.name),
+          genreContentTypes: items.map((i) => (i as Genre).content_type),
+        });
+        eventbus.emit("clearSelection");
+      },
+      icon: Merge,
+    });
+  }
+  // delete genre(s) (admin only, all items must be library genres)
+  if (
+    items.every(
+      (i) => i.media_type === MediaType.GENRE && i.provider === "library",
+    ) &&
+    managesLibrary
+  ) {
+    contextMenuItems.push({
+      label: "delete_genre",
+      labelArgs: [],
+      action: () => {
+        eventbus.emit("deleteGenreDialog", {
+          genreIds: items.map((i) => i.item_id),
+          navigateBack: items.length === 1 && items[0] === parentItem,
+        });
+        eventbus.emit("clearSelection");
+      },
+      icon: Trash2,
+    });
+  }
+  return contextMenuItems;
+};
+
+/**
+  Generates playback-related context menu items based on the given media items and their parent.
+  This includes "Play now", the "Enqueue options" submenu and "Play from here" (for playlists/albums).
+  An AudioSource only gets "Play now": it cannot be queued for later.
+*/
+export const getPlaybackContextMenuItems = async function (
+  items: MediaItemTypeOrItemMapping[],
+  parentItem?: MediaItemType,
+  sortBy?: string,
+) {
+  const playMenuItems: ContextMenuItem[] = [];
+  if (items.length == 0 || !itemIsAvailable(items[0])) {
+    return playMenuItems;
+  }
+
+  // a MusicBrainz release in the selection has nothing to play
+  const playableItems = items.filter(
+    (x) => x.is_playable && !isMusicBrainzItem(x),
+  );
+  if (playableItems.length == 0) return playMenuItems;
+  const firstItem = playableItems[0];
+
+  const defaultEnqueueOption = await getDefaultEnqueueOption(firstItem);
+
+  if (!store.activePlayer) return playMenuItems;
+
+  if (isAudioSource(firstItem)) {
+    playMenuItems.push(
+      startAudioSourceMenuItem(playableItems, defaultEnqueueOption),
+    );
+    return playMenuItems;
+  }
+
+  // Play from here...
+  if (
+    playableItems.length == 1 &&
+    parentItem &&
+    parentItem.uri != firstItem.uri
+  ) {
+    // Play from here (playlist track)
+    if (parentItem.media_type == MediaType.PLAYLIST) {
+      playMenuItems.push({
+        label: "play_playlist_from",
+        action: () => {
+          api.playMedia(parentItem.uri, undefined, {
+            start_item: playableItems[0].item_id,
+            sort_by: sortBy,
+          });
+        },
+        icon: PlayCircle,
+        labelArgs: [],
+        disabled: !store.activePlayer,
+      });
+    }
+    // Play from here (album track)
+    if (parentItem.media_type == MediaType.ALBUM) {
+      playMenuItems.push({
+        label: "play_album_from",
+        action: () => {
+          api.playMedia(parentItem.uri, undefined, {
+            start_item: firstItem.item_id,
+            sort_by: sortBy,
+          });
+        },
+        icon: PlayCircle,
+        labelArgs: [],
+        disabled: !store.activePlayer,
+      });
+    }
+    // Play from here (podcast episode)
+    if (parentItem.media_type == MediaType.PODCAST) {
+      playMenuItems.push(playPodcastFromHereMenuItem(firstItem, parentItem));
+    }
+  }
+  // Default/configured enqueue option at the top (if play from here is not applicable)
+  else if (
+    defaultEnqueueOption === undefined ||
+    [QueueOption.PLAY, QueueOption.REPLACE].includes(defaultEnqueueOption)
+  ) {
+    playMenuItems.push({
+      label: "play_now",
+      action: () => {
+        api.playMedia(
+          playableItems.map((x) => x.uri),
+          defaultEnqueueOption,
+        );
+      },
+      icon: PlayCircle,
+      labelArgs: [],
+      disabled: !store.activePlayer,
+    });
+  }
+
+  // "Enqueue..." submenu with all enqueue options
+  playMenuItems.push({
+    label: "enqueue",
+    subItems: buildEnqueueMenuItems(items, defaultEnqueueOption),
+    icon: ListMusic,
+    labelArgs: [],
+  });
+  // Multi-select mark as played/unplayed for podcast episodes
+  if (
+    authManager.hasScope(Scope.LIBRARY_WRITE) &&
+    items.length > 1 &&
+    items.every((item) => item.media_type === MediaType.PODCAST_EPISODE)
+  ) {
+    const podcastEpisodes = items as PodcastEpisode[];
+
+    // Helper functions for clearer state detection
+    const hasProgress = (item: PodcastEpisode) =>
+      (item.resume_position_ms || 0) > 0;
+    const isFullyPlayed = (item: PodcastEpisode) => item.fully_played;
+    const isUnplayed = (item: PodcastEpisode) =>
+      !item.fully_played && !hasProgress(item);
+
+    const allFullyPlayed = podcastEpisodes.every(isFullyPlayed);
+    const allUnplayed = podcastEpisodes.every(isUnplayed);
+
+    // Throttled: a bulk selection can span thousands of episodes. Per-command
+    // error toasts are suppressed so one broken connection can't produce a
+    // toast per episode; failures are counted and reported once instead.
+    const markAll = async (
+      command: (item: PodcastEpisode) => Promise<void>,
+    ): Promise<void> => {
+      const outcomes = await runWithConcurrency(
+        podcastEpisodes,
+        async (item: PodcastEpisode) => {
+          try {
+            await command(item);
+            return true;
+          } catch (err) {
+            console.error("[markAll] failed for %s", item.uri, err);
+            return false;
+          }
+        },
+      );
+      const failed = outcomes.filter((ok) => !ok).length;
+      if (failed) {
+        toast.error($t("mark_played_partial_failure", [failed]));
+      }
+    };
+    const markAllPlayed = () =>
+      markAll((item) =>
+        api.markItemPlayed(item, true, undefined, {
+          suppressGlobalError: true,
+        }),
+      );
+    const markAllUnPlayed = () =>
+      markAll((item) =>
+        api.markItemUnPlayed(item, { suppressGlobalError: true }),
+      );
+
+    // If all items are fully played, show "mark unplayed" option
+    if (allFullyPlayed) {
+      playMenuItems.push({
+        label: "mark_unplayed",
+        icon: History,
+        action: markAllUnPlayed,
+      });
+    }
+    // If all items are unplayed, show "mark played" option
+    else if (allUnplayed) {
+      playMenuItems.push({
+        label: "mark_played",
+        icon: History,
+        action: markAllPlayed,
+      });
+    }
+    // If mixed state, show both options
+    else {
+      playMenuItems.push({
+        label: "mark_played",
+        icon: History,
+        action: markAllPlayed,
+      });
+
+      playMenuItems.push({
+        label: "mark_unplayed",
+        icon: History,
+        action: markAllUnPlayed,
+      });
+    }
+  }
+  return playMenuItems;
+};
+
+// Radio and AudioSource are both live, infinite streams and share a single enqueue
+// default on the server; every other media type has its own config key.
+const LIVE_SOURCE_MEDIA_TYPES = [MediaType.RADIO, MediaType.AUDIO_SOURCE];
+
+/**
+ * The configured default enqueue option for the given item's media type, or
+ * undefined for a role that may not read it: a play command without an option
+ * gets the same default from the server.
+ *
+ * Only "play" and "replace" are configurable, so either way the item starts
+ * playing right away.
+ */
+const getDefaultEnqueueOption = async function (
+  item: MediaItemTypeOrItemMapping,
+): Promise<QueueOption | undefined> {
+  // the server's own defaults apply to a role that may not read the core settings
+  if (!authManager.hasScope(Scope.CONFIG_CORE_READ)) {
+    return undefined;
+  }
+  const configKey = LIVE_SOURCE_MEDIA_TYPES.includes(item.media_type)
+    ? "default_enqueue_option_live_sources"
+    : `default_enqueue_option_${item.media_type}`;
+  return (await api.getCoreConfigValue(
+    "player_queues",
+    configKey,
+  )) as QueueOption;
+};
+
+/**
+ * Menu entries for every way the given items can be started or queued, with the
+ * configured default, when known, marked as selected.
+ */
+const buildEnqueueMenuItems = function (
+  items: MediaItemTypeOrItemMapping[],
+  defaultEnqueueOption: QueueOption | undefined,
+): ContextMenuItem[] {
+  return [
+    QueueOption.PLAY,
+    QueueOption.NEXT,
+    QueueOption.ADD,
+    QueueOption.REPLACE,
+    QueueOption.REPLACE_NEXT,
+  ].map((option) => ({
+    label: $t(`queue_option.${option}`),
+    action: () => {
+      api.playMedia(
+        items.map((x) => x.uri),
+        option,
+      );
+    },
+    icon: queueOptionIconMap[option],
+    labelArgs: [],
+    disabled: !store.activePlayer,
+    selected: option === defaultEnqueueOption,
+  }));
+};
+
+/**
+ * The single "Play now" entry offered for an AudioSource.
+ *
+ * An AudioSource hands the player over to a live external source (Spotify Connect,
+ * an AirPlay receiver, ...) that never ends, so anything placed behind it in the
+ * queue would never be reached: starting it is the only meaningful action. The
+ * configured default decides whether the existing queue is kept or replaced.
+ */
+const startAudioSourceMenuItem = function (
+  items: MediaItemTypeOrItemMapping[],
+  defaultEnqueueOption: QueueOption | undefined,
+): ContextMenuItem {
+  return {
+    label: "play_now",
+    action: () => {
+      api.playMedia(
+        items.map((x) => x.uri),
+        defaultEnqueueOption,
+      );
+    },
+    icon: PlayCircle,
+    labelArgs: [],
+    disabled: !store.activePlayer,
+  };
+};
+
+/**
+ * Menu entry that plays a podcast from the given episode onwards.
+ *
+ * Episodes are listed newest first, so playback runs the other way, from the
+ * chosen episode forward in time to the latest one.
+ */
+const playPodcastFromHereMenuItem = function (
+  episode: MediaItemTypeOrItemMapping,
+  podcast: MediaItemType,
+): ContextMenuItem {
+  return {
+    label: "play_from_here_to_latest",
+    labelArgs: [],
+    action: () => {
+      api.playMedia(podcast.uri, undefined, { start_item: episode.item_id });
+    },
+    icon: PlayCircle,
+    disabled: !store.activePlayer,
+  };
+};
+
+/**
+ * The identity to hand an add command for the given item. Adding a library
+ * row whose item no longer exists fails on its dead id, so a library row is
+ * sent as one of its provider mappings, which the server resolves back to a
+ * library item.
+ */
+const addableItem = function (
+  item: MediaItemTypeOrItemMapping,
+): string | MediaItemTypeOrItemMapping {
+  // the server resolves a MusicBrainz uri to the album on a music service
+  if (isMusicBrainzItem(item)) return item.uri;
+  if (item.provider !== "library" || !("provider_mappings" in item)) {
+    return item;
+  }
+  const mapping =
+    item.provider_mappings.find(
+      (pm) => pm.available && api.providers[pm.provider_instance]?.available,
+    ) ?? item.provider_mappings[0];
+  if (!mapping) return item;
+  return `${mapping.provider_instance}://${item.media_type}/${mapping.item_id}`;
+};
+
+/**
+ * Hydrate a single audiobook or podcast-episode reference (no provider
+ * mappings) with the play state the menu needs; anything else is returned
+ * as is.
+ */
+const withFullItemDetails = async function (
+  items: MediaItemTypeOrItemMapping[],
+): Promise<MediaItemTypeOrItemMapping[]> {
+  if (items.length != 1) return items;
+  const item = items[0];
+  if ("provider_mappings" in item || !itemSupportsPlayLog(item)) {
+    return items;
+  }
+  // a failed lookup still opens the menu, without the actions needing the detail
+  const fullItem = await api
+    .getItem(item.media_type, item.item_id, item.provider, {
+      suppressGlobalError: true,
+    })
+    .catch((err) => {
+      console.error("[ItemContextMenu] failed to resolve %s", item.uri, err);
+      return undefined;
+    });
+  if (!fullItem || !itemSupportsPlayLog(fullItem)) return items;
+  // hydrate only the play state onto the reference: id-based actions (favorites,
+  // library) and the playlog are keyed by the identity the card holds
+  return [
+    {
+      ...item,
+      fully_played: fullItem.fully_played,
+      resume_position_ms: fullItem.resume_position_ms,
+    } as MediaItemTypeOrItemMapping,
+  ];
+};
+
+// media types whose contents have an order that is worth shuffling. Audiobooks and
+// podcasts are left out: their chapters/episodes are meant to be heard in order.
+const SHUFFLEABLE_MEDIA_TYPES = [
+  MediaType.ALBUM,
+  MediaType.ARTIST,
+  MediaType.COLLECTION,
+  MediaType.FOLDER,
+  MediaType.GENRE,
+  MediaType.PLAYLIST,
+];
+
+/**
+ * Whether starting the given items shuffled is worth offering.
+ *
+ * A single item needs to be a container to have an order to shuffle; a hand-picked
+ * selection of several items is the user's own list, so it always qualifies.
+ */
+const canPlayShuffled = function (
+  items: MediaItemTypeOrItemMapping[],
+): boolean {
+  return (
+    items.length > 1 || SHUFFLEABLE_MEDIA_TYPES.includes(items[0].media_type)
+  );
+};
+</script>

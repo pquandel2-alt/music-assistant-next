@@ -1,0 +1,31 @@
+[build-system]
+requires      = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name         = "music-assistant-next-frontend"
+version = "0.1.0"
+license      = "Apache-2.0"
+description  = "The Music Assistant frontend"
+readme       = "README.md"
+authors      = [
+    {name = "The Music Assistant Authors", email = "m.vanderveldt@outlook.com"}
+]
+requires-python = ">=3.11.0"
+
+[project.urls]
+"Homepage" = "https://github.com/music-assistant/frontend"
+"Upstream" = "https://github.com/music-assistant/frontend"
+
+[tool.setuptools]
+platforms = ["any"]
+zip-safe  = false
+include-package-data = true
+
+[tool.setuptools.packages.find]
+# `pnpm build` writes the bundle here; its assets/ subdirectory has no __init__.py,
+# so the glob relies on namespace discovery to include it.
+include = ["music_assistant_frontend", "music_assistant_frontend.*"]
+
+[tool.codespell]
+ignore-words-list = "provid,hass,followings"

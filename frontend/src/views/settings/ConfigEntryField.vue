@@ -1,0 +1,515 @@
+<template>
+  <div class="config-field">
+    <!-- divider value -->
+    <div
+      v-if="confEntry.type == ConfigEntryType.DIVIDER"
+      class="config-divider"
+    >
+      <v-divider />
+      <v-label v-if="confEntry.label" class="divider-label">
+        {{ confEntry.label }}
+      </v-label>
+    </div>
+
+    <!-- label value -->
+    <LabelField
+      v-else-if="confEntry.type == ConfigEntryType.LABEL"
+      :text="displayLabel()"
+    />
+
+    <!-- alert value -->
+    <AlertField
+      v-else-if="confEntry.type == ConfigEntryType.ALERT"
+      :text="displayLabel()"
+    />
+
+    <!-- image value (presentational, e.g. a pairing QR code) -->
+    <div
+      v-else-if="confEntry.type == ConfigEntryType.IMAGE"
+      class="config-image"
+    >
+      <img
+        v-if="imageSrc"
+        :src="imageSrc"
+        :alt="displayLabel()"
+        loading="lazy"
+      />
+    </div>
+
+    <!-- action type -->
+    <v-btn
+      v-else-if="
+        confEntry.type == ConfigEntryType.ACTION ||
+        (confEntry.action && !confEntry.value)
+      "
+      color="primary"
+      class="action-btn"
+      :disabled="isFieldDisabled"
+      @click="$emit('action')"
+    >
+      {{ displayActionLabel() }}
+    </v-btn>
+
+    <!-- Home Assistant entity picker for a single player control -->
+    <HassControlPickerField
+      v-else-if="isHassControlPickerEntry(confEntry)"
+      :entry="confEntry"
+      :disabled="isFieldDisabled"
+      @set-entry-value="
+        (key: string, value: ConfigValueType, label?: string) =>
+          emit('setEntryValue', key, value, label)
+      "
+    />
+
+    <!-- Home Assistant control entities: current selection plus an entity picker -->
+    <HassControlsField
+      v-else-if="isHassControlsEntry"
+      :entry="confEntry"
+      :label="displayLabel()"
+      :disabled="isFieldDisabled"
+      @update:value="onUpdateValue($event)"
+    />
+
+    <!-- boolean value: checkbox -->
+    <v-checkbox
+      v-else-if="confEntry.type == ConfigEntryType.BOOLEAN"
+      :model-value="confEntry.value"
+      :label="displayLabel()"
+      color="primary"
+      :disabled="isFieldDisabled"
+      hide-details
+      density="comfortable"
+      @update:model-value="$emit('update:value', $event)"
+    />
+
+    <!-- int/float value in range: slider control -->
+    <div
+      v-else-if="
+        isNumberEntry && confEntry.range && confEntry.range.length == 2
+      "
+      class="config-slider-wrapper"
+    >
+      <v-label class="config-slider-label">
+        {{ displayLabel() }}
+      </v-label>
+      <div class="config-slider-block">
+        <v-slider
+          :model-value="confEntry.value as number"
+          :disabled="isFieldDisabled"
+          :required="confEntry.required"
+          :min="confEntry.range[0]"
+          :max="confEntry.range[1]"
+          :step="confEntry.type == ConfigEntryType.FLOAT ? 0.5 : 1"
+          hide-details
+          color="primary"
+          class="config-slider"
+          @update:model-value="$emit('update:value', $event)"
+        />
+
+        <div class="config-slider-input">
+          <NumberField
+            :model-value="confEntry.value as number"
+            :disabled="isFieldDisabled"
+            :min="confEntry.range[0]"
+            :max="confEntry.range[1]"
+            :step="confEntry.type == ConfigEntryType.FLOAT ? 0.5 : 1"
+            :format-options="{
+              maximumFractionDigits:
+                confEntry.type == ConfigEntryType.FLOAT ? 1 : 0,
+            }"
+            class="w-[100px]"
+            @update:model-value="$emit('update:value', $event)"
+          >
+            <NumberFieldContent>
+              <NumberFieldInput />
+              <NumberFieldDecrement />
+              <NumberFieldIncrement />
+            </NumberFieldContent>
+          </NumberField>
+        </div>
+      </div>
+    </div>
+
+    <!-- password value -->
+    <v-text-field
+      v-else-if="confEntry.type == ConfigEntryType.SECURE_STRING"
+      :model-value="confEntry.value"
+      :label="displayLabel()"
+      :required="confEntry.required"
+      :disabled="isFieldDisabled"
+      :rules="[
+        (v) => !(!v && confEntry.required) || $t('settings.invalid_input'),
+      ]"
+      :type="showPasswordValues ? 'text' : 'password'"
+      :append-inner-icon="
+        showPasswordValues
+          ? 'mdi-eye'
+          : typeof confEntry.value == 'string' &&
+              confEntry.value.includes(SECURE_STRING_SUBSTITUTE)
+            ? ''
+            : 'mdi-eye-off'
+      "
+      variant="outlined"
+      density="comfortable"
+      clearable
+      :readonly="!!confEntry.action"
+      @update:model-value="onUpdateValue($event)"
+      @click:append-inner="emit('togglePassword')"
+      @click:clear="onClear"
+    />
+
+    <!-- pairing code: one box per code character -->
+    <PairingCodeField
+      v-else-if="confEntry.type == ConfigEntryType.PAIRING_CODE"
+      :entry="confEntry"
+      :label="displayLabel()"
+      :disabled="isFieldDisabled"
+      @update:value="onUpdateValue($event)"
+    />
+
+    <!-- folder on one of the server's storage locations -->
+    <FolderPickerField
+      v-else-if="confEntry.type == ConfigEntryType.FOLDER"
+      :entry="confEntry"
+      :label="displayLabel()"
+      :disabled="isFieldDisabled"
+      @update:value="onUpdateValue($event)"
+    />
+
+    <!-- value with all options expanded: one button per option -->
+    <RadioGroupField
+      v-else-if="
+        confEntry.options.length > 0 &&
+        confEntry.expanded_options &&
+        !confEntry.multi_value
+      "
+      :label="displayLabel()"
+      :options="displayOptions"
+      :value="confEntry.value"
+      :disabled="isFieldDisabled"
+      @update:value="onUpdateValue($event)"
+    />
+
+    <!-- value with dropdown -->
+    <v-select
+      v-else-if="confEntry.options.length > 0"
+      :model-value="confEntry.value"
+      :menu-props="{ zIndex: 10000 }"
+      :chips="confEntry.multi_value"
+      :clearable="true"
+      :multiple="confEntry.multi_value"
+      :items="displayOptions"
+      :item-props="
+        (item) => ({
+          title: item.title,
+          value: item.value,
+          disabled: item.disabled,
+          subtitle: item.disabled ? item.disabled_reason : item.description,
+        })
+      "
+      :disabled="isFieldDisabled"
+      :label="displayLabel()"
+      :required="confEntry.required"
+      :rules="[
+        (v) =>
+          !((v === null || v === undefined) && confEntry.required) ||
+          $t('settings.invalid_input'),
+      ]"
+      variant="outlined"
+      density="comfortable"
+      @update:model-value="onUpdateValue($event)"
+      @click:clear="onClear"
+    />
+
+    <!-- int value without range -->
+    <v-text-field
+      v-else-if="isNumberEntry"
+      :model-value="confEntry.value"
+      :placeholder="confEntry.default_value?.toString()"
+      :disabled="isFieldDisabled"
+      :label="displayLabel()"
+      :required="confEntry.required"
+      :rules="[
+        (v) => !(!v && confEntry.required) || $t('settings.invalid_input'),
+      ]"
+      variant="outlined"
+      density="comfortable"
+      :clearable="!confEntry.required"
+      type="number"
+      @update:model-value="onUpdateValue($event)"
+      @click:clear="onClear"
+    />
+
+    <!-- icon picker -->
+    <IconPicker
+      v-else-if="confEntry.type == ConfigEntryType.ICON"
+      :model-value="confEntry.value as string"
+      :placeholder="confEntry.default_value?.toString()"
+      :disabled="isFieldDisabled"
+      :label="displayLabel()"
+      @update:model-value="onUpdateValue($event)"
+      @click:clear="onClear"
+    />
+
+    <!-- multi-value string combobox -->
+    <v-combobox
+      v-else-if="
+        confEntry.type == ConfigEntryType.STRING && confEntry.multi_value
+      "
+      :model-value="confEntry.value as string[]"
+      :menu-props="{ zIndex: 10000 }"
+      multiple
+      chips
+      :clearable="true"
+      :disabled="isFieldDisabled"
+      :label="displayLabel()"
+      :required="confEntry.required"
+      :rules="[
+        (v) => !(!v && confEntry.required) || $t('settings.invalid_input'),
+      ]"
+      variant="outlined"
+      density="comfortable"
+      @update:model-value="onUpdateValue($event)"
+      @click:clear="onClear"
+    />
+
+    <!-- all other: textbox with single value -->
+    <v-text-field
+      v-else
+      :model-value="confEntry.value"
+      :placeholder="confEntry.default_value?.toString()"
+      clearable
+      :disabled="isFieldDisabled"
+      :label="displayLabel()"
+      :required="confEntry.required"
+      :rules="[
+        (v) => !(!v && confEntry.required) || $t('settings.invalid_input'),
+      ]"
+      variant="outlined"
+      density="comfortable"
+      :readonly="!!confEntry.action"
+      @update:model-value="onUpdateValue($event)"
+      @click:clear="onClear"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import {
+  NumberField,
+  NumberFieldContent,
+  NumberFieldDecrement,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "@/components/ui/number-field";
+import {
+  ConfigEntry,
+  ConfigEntryType,
+  ConfigValueOption,
+  ConfigValueType,
+  SECURE_STRING_SUBSTITUTE,
+} from "@/plugins/api/interfaces";
+import IconPicker from "@/components/IconPicker.vue";
+import AlertField from "./fields/AlertField.vue";
+import FolderPickerField from "./fields/FolderPickerField.vue";
+import HassControlPickerField from "./fields/HassControlPickerField.vue";
+import HassControlsField from "./fields/HassControlsField.vue";
+import LabelField from "./fields/LabelField.vue";
+import PairingCodeField from "./fields/PairingCodeField.vue";
+import RadioGroupField from "./fields/RadioGroupField.vue";
+import {
+  ConfigEntryUI,
+  HASS_CONTROL_KEYS,
+  isHassControlPickerEntry,
+} from "@/helpers/config_entry_ui";
+import { HASS_DOMAIN } from "@/helpers/hass_controls";
+import { $t } from "@/plugins/i18n";
+import { computed } from "vue";
+
+const props = defineProps<{
+  confEntry: ConfigEntryUI;
+  showPasswordValues: boolean;
+  disabled?: boolean;
+  // domain of the provider this config belongs to; absent for player and core configs
+  providerDomain?: string;
+}>();
+
+// only the Home Assistant provider's own control lists get the entity picker, not any
+// other provider that happens to use the same key names
+const isHassControlsEntry = computed(
+  () =>
+    props.providerDomain === HASS_DOMAIN &&
+    HASS_CONTROL_KEYS.has(props.confEntry.key),
+);
+
+const isFieldDisabled = computed(() => {
+  return props.disabled || props.confEntry.read_only;
+});
+
+const isNumberEntry = computed(
+  () =>
+    props.confEntry.type == ConfigEntryType.INTEGER ||
+    props.confEntry.type == ConfigEntryType.FLOAT,
+);
+
+// Only surface an <img> when a source is actually available; otherwise the
+// element would render as a broken image (both value and default missing).
+const imageSrc = computed(
+  () =>
+    (props.confEntry.value ?? props.confEntry.default_value) as
+      string | undefined,
+);
+
+const emit = defineEmits<{
+  (e: "togglePassword"): void;
+  (e: "action"): void;
+  (e: "update:value", value: ConfigValueType): void;
+  // set the value of another entry on the same form
+  (
+    e: "setEntryValue",
+    key: string,
+    value: ConfigValueType,
+    label?: string,
+  ): void;
+}>();
+
+// Labels arrive display-ready: server-provided entries are resolved server-side for the
+// connection locale, and frontend-only entries are translated where they are constructed.
+// This field just surfaces them, so there is no translation lookup here.
+// An empty label is a deliberate "no label"; only a missing one falls back to the key.
+const displayLabel = () => props.confEntry.label ?? props.confEntry.key;
+
+const displayActionLabel = () =>
+  props.confEntry.action_label || props.confEntry.label || props.confEntry.key;
+
+const onUpdateValue = (value: ConfigValueType) => {
+  // When value is cleared (null/undefined/empty array), emit the default value instead
+  // For non-required text fields, allow empty strings as a valid value
+  if (
+    value === null ||
+    value === undefined ||
+    (value === "" && props.confEntry.required) ||
+    (Array.isArray(value) && value.length === 0)
+  ) {
+    emit("update:value", props.confEntry.default_value);
+  } else if (value === "" && isNumberEntry.value) {
+    // an emptied number field has no value, so the server falls back to the default
+    emit("update:value", null);
+  } else {
+    emit("update:value", value);
+  }
+};
+
+const onClear = () => {
+  emit("update:value", null);
+};
+
+const displayOptions = computed(() => {
+  const options: ConfigValueOption[] = [];
+  for (const orgOption of props.confEntry.options) {
+    // option titles are resolved server-side for the connection locale; use them directly
+    const option: ConfigValueOption = {
+      title: orgOption.title?.toString() || orgOption.value?.toString() || "",
+      value: orgOption.value,
+      disabled: orgOption.disabled,
+      disabled_reason: orgOption.disabled_reason,
+      description: orgOption.description,
+    };
+    if (option.value == props.confEntry.default_value) {
+      option.title += ` [${$t("settings.default")}]`;
+    }
+    options.push(option);
+  }
+  // a value the server has not listed yet - a player control registered moments ago -
+  // would leave the select blank, so it is offered as an option of its own
+  const listedValues = new Set(options.map((option) => option.value));
+  const values = Array.isArray(props.confEntry.value)
+    ? props.confEntry.value
+    : [props.confEntry.value];
+  for (const value of values) {
+    if (value === null || value === undefined || listedValues.has(value)) {
+      continue;
+    }
+    listedValues.add(value);
+    options.push({ title: value.toString(), value });
+  }
+  return options;
+});
+</script>
+
+<style scoped>
+.config-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-divider {
+  padding: 8px 0;
+}
+
+.config-image {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.config-image img {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: 8px;
+}
+
+.divider-label {
+  display: block;
+  margin-top: 12px;
+  font-weight: 600;
+  font-size: 0.875rem;
+}
+
+.action-btn {
+  margin: 8px 0;
+  margin-bottom: 20px;
+  width: 100%;
+  height: 50px;
+}
+
+.config-slider-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-slider-label {
+  font-size: 0.875rem;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  margin-bottom: 0;
+}
+
+.config-slider-block {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-slider-input {
+  flex-shrink: 0;
+}
+
+@media (min-width: 601px) {
+  .config-slider-wrapper {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .config-slider-label {
+    flex-shrink: 0;
+    margin-bottom: 0;
+  }
+
+  .config-slider-block {
+    flex: 1;
+  }
+}
+</style>

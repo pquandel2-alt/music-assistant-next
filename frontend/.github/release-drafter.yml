@@ -1,0 +1,49 @@
+change-template: "- $TITLE (by @$AUTHOR in #$NUMBER)"
+
+# Exclude bots from contributors list
+exclude-contributors:
+  - dependabot
+  - dependabot[bot]
+  - github-actions
+  - github-actions[bot]
+
+# A PR can carry labels from more than one category, so every category is
+# exclusive: the first one matching below wins and the PR is listed only once.
+categories:
+  - title: "⚠ Breaking Changes"
+    exclusive: true
+    when:
+      - labels:
+          - "breaking-change"
+
+  - title: "🚀 Features and enhancements"
+    exclusive: true
+    when:
+      - labels:
+          - "enhancement"
+          - "new-feature"
+
+  - title: "🐛 Bugfixes"
+    exclusive: true
+    when:
+      - labels:
+          - "bugfix"
+
+  - title: "🧰 Maintenance and dependency bumps"
+    exclusive: true
+    collapse-after: 3
+    when:
+      - labels:
+          - "ci"
+          - "maintenance"
+          - "refactor"
+          - "dependencies"
+
+template: |
+
+  $CHANGES
+
+
+  ## :bow: Contributors
+
+  $CONTRIBUTORS

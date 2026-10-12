@@ -1,0 +1,17 @@
+# Verified 2026-10-11. Update only through docs/UPSTREAM_SYNC.md.
+frontend.repository=https://github.com/music-assistant/frontend.git
+frontend.branch=main
+frontend.commit=2363be04cba84631c08b2e6e84d0e2fa4feab6e1
+server.repository=https://github.com/music-assistant/server.git
+server.branch=dev
+server.commit=7369e5aef8ec90902505cc66b2ff7a5b563457c2
+addon.repository=https://github.com/music-assistant/home-assistant-addon.git
+addon.branch=main
+addon.commit=2ea78a529f04fea79a8b3ca08d10b315af764c19
+models.repository=https://github.com/music-assistant/models.git
+models.branch=main
+models.commit=3a5bea7ec7d7be9db92e95d466f6b021079d33b3
+server.models_package=music-assistant-models==1.1.221
+frontend.package=music-assistant-next-frontend==0.1.0
+server.version=2.11.0.dev20261011+next.1
+addon.version=2.11.0-next.1

@@ -1,0 +1,929 @@
+import ShowDashboardButton from "@/components/ShowDashboardButton.vue";
+import {
+  EventType,
+  type DashboardType,
+  type EventMessage,
+  type Scope,
+  type ServerInfoMessage,
+} from "@/plugins/api/interfaces";
+import { ApiCommandError } from "@/plugins/api/errors";
+import { Check } from "@lucide/vue";
+import { mount } from "@vue/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BUILTIN_ROLE_SCOPES, scopeChecker } from "../fixtures/scopes";
+
+const {
+  apiMock,
+  mockWaitForApiInitialization,
+  isDashboardViewerMock,
+  hasScopeMock,
+  toastMock,
+  copyToClipboardMock,
+} = vi.hoisted(() => ({
+  apiMock: {
+    sendCommand: vi.fn(),
+    subscribe: vi.fn(),
+    serverInfo: {
+      value: undefined as
+        | Pick<
+            ServerInfoMessage,
+            "base_url" | "external_url" | "has_remote_access"
+          >
+        | undefined,
+    },
+  },
+  mockWaitForApiInitialization: vi.fn(),
+  isDashboardViewerMock: vi.fn(() => false),
+  hasScopeMock: vi.fn<(scope: Scope) => boolean>(),
+  toastMock: { success: vi.fn(), error: vi.fn() },
+  copyToClipboardMock: vi.fn(),
+}));
+
+vi.mock("@/plugins/api", () => ({
+  default: apiMock,
+}));
+
+vi.mock("@/plugins/api/helpers", () => ({
+  waitForApiInitialization: mockWaitForApiInitialization,
+}));
+
+vi.mock("@/plugins/auth", () => ({
+  authManager: {
+    hasScope: hasScopeMock,
+    isDashboardViewer: isDashboardViewerMock,
+  },
+}));
+
+vi.mock("vue-sonner", () => ({
+  toast: toastMock,
+}));
+
+vi.mock("@/plugins/i18n", () => ({
+  $t: (key: string, values: unknown[] = []) =>
+    values.length ? `${key}:${values.join(",")}` : key,
+}));
+
+vi.mock("@/helpers/utils", () => ({
+  copyToClipboard: copyToClipboardMock,
+}));
+
+// Default dashboard so most tests get a visible button without extra setup; empty/hidden-state tests override this.
+const DEFAULT_DASHBOARD = {
+  dashboard_id: "device-1",
+  name: "Living Room TV",
+  supported_types: ["party", "now_playing"] as DashboardType[],
+};
+
+// Command responses keyed by name; unlisted commands fall back to one dashboard / no active sessions.
+function mockCommands(overrides: Record<string, () => unknown> = {}) {
+  apiMock.sendCommand.mockImplementation((command: string) => {
+    if (command in overrides) {
+      try {
+        return Promise.resolve(overrides[command]!());
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (command === "dashboard/sessions") {
+      return Promise.resolve([]);
+    }
+    if (command === "dashboard/dashboards") {
+      return Promise.resolve([DEFAULT_DASHBOARD]);
+    }
+    return Promise.resolve(undefined);
+  });
+}
+
+// Captures api.subscribe callbacks by event type so a test can fire a fake event.
+function captureSubscriptions() {
+  const callbacks = new Map<EventType, (evt: EventMessage) => void>();
+  apiMock.subscribe.mockImplementation(
+    (eventType: EventType, cb: (evt: EventMessage) => void) => {
+      callbacks.set(eventType, cb);
+      return vi.fn();
+    },
+  );
+  return {
+    emit: (eventType: EventType, data: unknown) =>
+      callbacks.get(eventType)?.({ event: eventType, data }),
+  };
+}
+
+function mountButton(
+  props: { dashboard: DashboardType; playerId?: string } = {
+    dashboard: "party",
+  },
+) {
+  const passthroughStub = { template: "<div><slot /></div>" };
+  return mount(ShowDashboardButton, {
+    props,
+    global: {
+      stubs: {
+        DropdownMenu: passthroughStub,
+        DropdownMenuContent: passthroughStub,
+        DropdownMenuTrigger: passthroughStub,
+        DropdownMenuSeparator: { template: "<hr />" },
+        DropdownMenuItem: {
+          props: ["variant"],
+          emits: ["click"],
+          template:
+            '<button data-testid="cast-dashboard-device" :data-variant="variant" @click="$emit(\'click\')"><slot /></button>',
+        },
+        DashboardDeviceIcon: {
+          props: ["providerDomainHint"],
+          template:
+            '<i data-testid="cast-dashboard-device-icon" :data-icon="providerDomainHint" />',
+        },
+        "v-icon": { template: "<i />" },
+      },
+    },
+  });
+}
+
+describe("ShowDashboardButton", () => {
+  beforeEach(() => {
+    apiMock.sendCommand.mockReset();
+    apiMock.subscribe.mockReset();
+    apiMock.subscribe.mockImplementation(() => vi.fn());
+    mockWaitForApiInitialization.mockReset();
+    mockWaitForApiInitialization.mockResolvedValue(undefined);
+    mockCommands();
+    isDashboardViewerMock.mockReset();
+    isDashboardViewerMock.mockReturnValue(false);
+    hasScopeMock.mockImplementation(scopeChecker(BUILTIN_ROLE_SCOPES.user));
+    toastMock.success.mockReset();
+    toastMock.error.mockReset();
+    copyToClipboardMock.mockReset();
+    copyToClipboardMock.mockResolvedValue(true);
+    apiMock.serverInfo.value = {
+      base_url: "http://192.168.1.2:8095",
+      external_url: null,
+      has_remote_access: false,
+    };
+  });
+
+  it("renders nothing without dashboards when the server can't make a dashboard url", async () => {
+    mockCommands({ "dashboard/dashboards": () => [] });
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(wrapper.find("button").exists()).toBe(false);
+  });
+
+  it.each([
+    [
+      "remote access",
+      {
+        base_url: "http://192.168.1.2:8095",
+        external_url: null,
+        has_remote_access: true,
+      },
+    ],
+    [
+      "an https base url",
+      {
+        base_url: "https://ma.example.com",
+        external_url: null,
+        has_remote_access: false,
+      },
+    ],
+    [
+      "an https external url",
+      {
+        base_url: "http://192.168.1.2:8095",
+        external_url: "https://ma.example.com",
+        has_remote_access: false,
+      },
+    ],
+  ])(
+    "still offers the dashboard url without dashboards when the server has %s",
+    async (_, serverInfo) => {
+      apiMock.serverInfo.value = serverInfo;
+      mockCommands({ "dashboard/dashboards": () => [] });
+
+      const wrapper = mountButton();
+      await flushAsync();
+      await wrapper.get("button").trigger("click");
+      await flushAsync();
+
+      expect(
+        wrapper.find('[data-testid="cast-dashboard-empty"]').exists(),
+      ).toBe(true);
+      expect(
+        wrapper.find('[data-testid="cast-dashboard-get-url"]').exists(),
+      ).toBe(true);
+    },
+  );
+
+  it("renders once at least one dashboard is registered", async () => {
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(wrapper.find("button").exists()).toBe(true);
+  });
+
+  it("renders nothing for a dashboard viewer session even when dashboards are registered", async () => {
+    isDashboardViewerMock.mockReturnValue(true);
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(wrapper.find("button").exists()).toBe(false);
+  });
+
+  it("renders nothing and asks for no dashboards for a role that may not invite", async () => {
+    hasScopeMock.mockImplementation(scopeChecker(BUILTIN_ROLE_SCOPES.guest));
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(wrapper.find("button").exists()).toBe(false);
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
+    expect(apiMock.subscribe).not.toHaveBeenCalled();
+  });
+
+  it("defers fetching until the API connection is initialized", async () => {
+    // A hard page refresh can mount this before the API has finished its initial sync.
+    const initialization = deferred<void>();
+    mockWaitForApiInitialization.mockReturnValue(initialization.promise);
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
+    expect(wrapper.find("button").exists()).toBe(false);
+
+    initialization.resolve();
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/dashboards", {
+      dashboard: "party",
+    });
+    expect(wrapper.find("button").exists()).toBe(true);
+  });
+
+  it("loads and lists cast devices when opened", async () => {
+    mockCommands({
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Living Room TV",
+          supported_types: ["party"],
+        },
+        {
+          dashboard_id: "device-2",
+          name: "Bedroom TV",
+          supported_types: ["party"],
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/dashboards", {
+      dashboard: "party",
+    });
+    const devices = wrapper.findAll('[data-testid="cast-dashboard-device"]');
+    expect(devices).toHaveLength(2);
+    expect(devices[0]!.text()).toContain("Bedroom TV");
+    expect(devices[1]!.text()).toContain("Living Room TV");
+  });
+
+  it("sorts devices by provider, then by name, with unknown providers last", async () => {
+    mockCommands({
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Attic",
+          supported_types: ["party"],
+        },
+        {
+          dashboard_id: "device-2",
+          name: "Study",
+          supported_types: ["party"],
+          provider_domain_hint: "chromecast",
+        },
+        {
+          dashboard_id: "device-3",
+          name: "Bedroom",
+          supported_types: ["party"],
+          provider_domain_hint: "chromecast",
+        },
+        {
+          dashboard_id: "device-4",
+          name: "Kitchen",
+          supported_types: ["party"],
+          provider_domain_hint: "airplay",
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    const names = wrapper
+      .findAll('[data-testid="cast-dashboard-device"]')
+      .map((device) => device.text());
+    expect(names).toEqual(["Kitchen", "Bedroom", "Study", "Attic"]);
+  });
+
+  it("passes each device's provider domain hint to its icon, one per device", async () => {
+    mockCommands({
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Living Room TV",
+          supported_types: ["party"],
+          provider_domain_hint: "chromecast",
+        },
+        {
+          dashboard_id: "device-2",
+          name: "Bedroom TV",
+          supported_types: ["party"],
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    const icons = wrapper.findAll('[data-testid="cast-dashboard-device-icon"]');
+    expect(icons).toHaveLength(2);
+    expect(icons[0]!.attributes("data-icon")).toBe("chromecast");
+    expect(icons[1]!.attributes("data-icon")).toBeUndefined();
+  });
+
+  it("starts the dashboard on the selected device and toasts success", async () => {
+    mockCommands({
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Kitchen",
+          supported_types: ["now_playing"],
+        },
+      ],
+    });
+
+    const wrapper = mountButton({
+      dashboard: "now_playing",
+      playerId: "player-1",
+    });
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper.get('[data-testid="cast-dashboard-device"]').trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).not.toHaveBeenCalledWith(
+      "dashboard/hide",
+      expect.anything(),
+    );
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/show", {
+      dashboard_id: "device-1",
+      dashboard: "now_playing",
+      player_id: "player-1",
+    });
+    expect(toastMock.success).toHaveBeenCalledWith("dashboard.started:Kitchen");
+  });
+
+  it("leaves error toasting to the global command handler on failure", async () => {
+    mockCommands({
+      "dashboard/show": () => {
+        throw new Error("Remote access disabled");
+      },
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+    await wrapper.get('[data-testid="cast-dashboard-device"]').trigger("click");
+    await flushAsync();
+
+    expect(toastMock.success).not.toHaveBeenCalled();
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
+
+  it("fetches sessions on mount and shows the icon in the active color when one matches this dashboard", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/sessions");
+    expect(wrapper.get("button").classes()).toContain("bg-primary");
+  });
+
+  it("does not color the icon when the active session is for a different dashboard", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "now_playing",
+          name: "Living Room TV",
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(wrapper.get("button").classes()).not.toContain("bg-primary");
+  });
+
+  it("colors a now_playing button only when the session targets its player", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "now_playing",
+          player_id: "player-2",
+          name: "Living Room TV",
+        },
+      ],
+    });
+
+    const otherPlayer = mountButton({
+      dashboard: "now_playing",
+      playerId: "player-1",
+    });
+    await flushAsync();
+    expect(otherPlayer.get("button").classes()).not.toContain("bg-primary");
+
+    const matchingPlayer = mountButton({
+      dashboard: "now_playing",
+      playerId: "player-2",
+    });
+    await flushAsync();
+    expect(matchingPlayer.get("button").classes()).toContain("bg-primary");
+  });
+
+  it("updates active state when a dashboard_sessions_updated event arrives", async () => {
+    const subscriptions = captureSubscriptions();
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    expect(apiMock.subscribe).toHaveBeenCalledWith(
+      EventType.DASHBOARD_SESSIONS_UPDATED,
+      expect.any(Function),
+    );
+    expect(wrapper.get("button").classes()).not.toContain("bg-primary");
+
+    subscriptions.emit(EventType.DASHBOARD_SESSIONS_UPDATED, [
+      {
+        dashboard_id: "device-1",
+        dashboard: "party",
+        name: "Living Room TV",
+      },
+    ]);
+    await flushAsync();
+
+    expect(wrapper.get("button").classes()).toContain("bg-primary");
+  });
+
+  it("marks the active device with a check and offers a disconnect item", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Living Room TV",
+          supported_types: ["party"],
+        },
+        {
+          dashboard_id: "device-2",
+          name: "Bedroom TV",
+          supported_types: ["party"],
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    const devices = wrapper.findAll('[data-testid="cast-dashboard-device"]');
+    expect(devices[0]!.text()).toContain("Bedroom TV");
+    expect(devices[0]!.findComponent(Check).exists()).toBe(false);
+    expect(devices[1]!.findComponent(Check).exists()).toBe(true);
+
+    const disconnect = wrapper.get('[data-testid="cast-dashboard-disconnect"]');
+    expect(disconnect.attributes("data-variant")).toBe("destructive");
+    expect(disconnect.text()).toContain("dashboard.disconnect:Living Room TV");
+  });
+
+  it("disconnect stops the active session and optimistically clears the active icon", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-disconnect"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/hide", {
+      dashboard_id: "device-1",
+    });
+    expect(wrapper.get("button").classes()).not.toContain("bg-primary");
+  });
+
+  it("refetches sessions when disconnect's dashboard/hide fails, rolling back the optimistic removal", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+      "dashboard/hide": () => {
+        throw new Error("device offline");
+      },
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+    apiMock.sendCommand.mockClear();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-disconnect"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/hide", {
+      dashboard_id: "device-1",
+    });
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/sessions");
+    // the resync brought the still-active session back, so the pill stays lit
+    expect(wrapper.get("button").classes()).toContain("bg-primary");
+  });
+
+  it("calls the sessions and dashboards subscriptions' unsubscribe functions on unmount", async () => {
+    const unsubscribeMocks: ReturnType<typeof vi.fn>[] = [];
+    apiMock.subscribe.mockImplementation(() => {
+      const unsubscribe = vi.fn();
+      unsubscribeMocks.push(unsubscribe);
+      return unsubscribe;
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+
+    wrapper.unmount();
+
+    expect(unsubscribeMocks).toHaveLength(2);
+    for (const unsubscribe of unsubscribeMocks) {
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("subscribes to dashboards_updated", async () => {
+    mountButton();
+    await flushAsync();
+
+    expect(apiMock.subscribe).toHaveBeenCalledWith(
+      EventType.DASHBOARDS_UPDATED,
+      expect.any(Function),
+    );
+  });
+
+  it("reloads the device list when a dashboards_updated event arrives", async () => {
+    let listCall = 0;
+    mockCommands({
+      "dashboard/dashboards": () => {
+        listCall += 1;
+        return listCall === 1
+          ? [DEFAULT_DASHBOARD]
+          : [
+              DEFAULT_DASHBOARD,
+              {
+                dashboard_id: "device-2",
+                name: "Bedroom TV",
+                supported_types: ["party"],
+              },
+            ];
+      },
+    });
+    const subscriptions = captureSubscriptions();
+
+    const wrapper = mountButton();
+    await flushAsync();
+    expect(
+      wrapper.findAll('[data-testid="cast-dashboard-device"]'),
+    ).toHaveLength(1);
+
+    subscriptions.emit(EventType.DASHBOARDS_UPDATED, undefined);
+    await flushAsync();
+
+    expect(listCall).toBe(2);
+    expect(
+      wrapper.findAll('[data-testid="cast-dashboard-device"]'),
+    ).toHaveLength(2);
+  });
+
+  it("selecting a different device hides the current session before showing the new one", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+      "dashboard/dashboards": () => [
+        {
+          dashboard_id: "device-1",
+          name: "Living Room TV",
+          supported_types: ["party"],
+        },
+        {
+          dashboard_id: "device-2",
+          name: "Bedroom TV",
+          supported_types: ["party"],
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    const devices = wrapper.findAll('[data-testid="cast-dashboard-device"]');
+    await devices[0]!.trigger("click"); // Bedroom TV, currently inactive
+    await flushAsync();
+
+    const commandNames = apiMock.sendCommand.mock.calls.map((call) => call[0]);
+    const hideIndex = commandNames.lastIndexOf("dashboard/hide");
+    const showIndex = commandNames.lastIndexOf("dashboard/show");
+    expect(hideIndex).toBeGreaterThanOrEqual(0);
+    expect(showIndex).toBeGreaterThan(hideIndex);
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/hide", {
+      dashboard_id: "device-1",
+    });
+    expect(apiMock.sendCommand).toHaveBeenCalledWith("dashboard/show", {
+      dashboard_id: "device-2",
+      dashboard: "party",
+      player_id: null,
+    });
+  });
+
+  it("clicking the already-active device is a no-op", async () => {
+    mockCommands({
+      "dashboard/sessions": () => [
+        {
+          dashboard_id: "device-1",
+          dashboard: "party",
+          name: "Living Room TV",
+        },
+      ],
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+    apiMock.sendCommand.mockClear();
+
+    await wrapper.get('[data-testid="cast-dashboard-device"]').trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).not.toHaveBeenCalledWith(
+      "dashboard/hide",
+      expect.anything(),
+    );
+    expect(apiMock.sendCommand).not.toHaveBeenCalledWith(
+      "dashboard/show",
+      expect.anything(),
+    );
+  });
+
+  it("displays a get-url menu item in the dropdown", async () => {
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    expect(
+      wrapper.find('[data-testid="cast-dashboard-get-url"]').exists(),
+    ).toBe(true);
+  });
+
+  it("retrieves and copies the dashboard URL to clipboard", async () => {
+    mockCommands({
+      "dashboard/get_url": () => "https://example.com/dashboard?token=abc123",
+    });
+
+    const wrapper = mountButton({
+      dashboard: "party",
+    });
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith(
+      "dashboard/get_url",
+      { dashboard: "party", player_id: null },
+      { suppressGlobalError: true },
+    );
+    expect(copyToClipboardMock).toHaveBeenCalledWith(
+      "https://example.com/dashboard?token=abc123",
+    );
+    expect(toastMock.success).toHaveBeenCalledWith("dashboard.uri_copied");
+  });
+
+  it("passes player_id to get_url command for now_playing dashboard", async () => {
+    mockCommands({
+      "dashboard/get_url": () => "https://example.com/dashboard?token=xyz",
+    });
+
+    const wrapper = mountButton({
+      dashboard: "now_playing",
+      playerId: "player-1",
+    });
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(apiMock.sendCommand).toHaveBeenCalledWith(
+      "dashboard/get_url",
+      { dashboard: "now_playing", player_id: "player-1" },
+      { suppressGlobalError: true },
+    );
+  });
+
+  it("shows error toast when get_url returns empty string", async () => {
+    mockCommands({
+      "dashboard/get_url": () => "",
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(toastMock.error).toHaveBeenCalledWith("dashboard.uri_copy_failed");
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("shows error toast when get_url returns null", async () => {
+    mockCommands({
+      "dashboard/get_url": () => null,
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(toastMock.error).toHaveBeenCalledWith("dashboard.uri_copy_failed");
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("shows error toast when get_url api call fails", async () => {
+    mockCommands({
+      "dashboard/get_url": () => {
+        throw new Error("Failed to generate URL");
+      },
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(toastMock.error).toHaveBeenCalledWith("dashboard.uri_copy_failed");
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the server's reason once when get_url is refused", async () => {
+    mockCommands({
+      "dashboard/get_url": () => {
+        throw new ApiCommandError(
+          "Remote access or an HTTPS base URL is required to cast dashboards",
+          1,
+          "Remote access or an HTTPS base URL is required to cast dashboards",
+        );
+      },
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(toastMock.error).toHaveBeenCalledOnce();
+    expect(toastMock.error).toHaveBeenCalledWith(
+      "Remote access or an HTTPS base URL is required to cast dashboards",
+    );
+    expect(copyToClipboardMock).not.toHaveBeenCalled();
+  });
+
+  it("shows error toast when copyToClipboard fails", async () => {
+    copyToClipboardMock.mockResolvedValue(false);
+    mockCommands({
+      "dashboard/get_url": () => "https://example.com/dashboard",
+    });
+
+    const wrapper = mountButton();
+    await flushAsync();
+    await wrapper.get("button").trigger("click");
+    await flushAsync();
+
+    await wrapper
+      .get('[data-testid="cast-dashboard-get-url"]')
+      .trigger("click");
+    await flushAsync();
+
+    expect(copyToClipboardMock).toHaveBeenCalledWith(
+      "https://example.com/dashboard",
+    );
+    expect(toastMock.error).toHaveBeenCalledWith("dashboard.uri_copy_failed");
+    expect(toastMock.success).not.toHaveBeenCalled();
+  });
+});
+
+async function flushAsync() {
+  for (let index = 0; index < 8; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}

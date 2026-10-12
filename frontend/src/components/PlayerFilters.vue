@@ -1,0 +1,219 @@
+<template>
+  <div class="filters-container">
+    <SearchInput v-model="searchQuery" :placeholder="$t('search')" />
+    <div class="filter-buttons">
+      <FacetedFilter
+        v-model="selectedProviders"
+        :title="$t('settings.player_provider')"
+        :options="providerOptions"
+      />
+      <FacetedFilter
+        v-model="selectedPlayerTypes"
+        :title="$t('settings.player_type_label')"
+        :options="playerTypeOptions"
+      />
+      <FacetedFilter
+        v-model="selectedStatuses"
+        :title="$t('settings.player_status_label')"
+        :options="statusOptions"
+      />
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import FacetedFilter from "@/components/FacetedFilter.vue";
+import { SearchInput } from "@/components/ui/search-input";
+import { api } from "@/plugins/api";
+import { PlayerType, ProviderType } from "@/plugins/api/interfaces";
+import { $t } from "@/plugins/i18n";
+import { computed, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+
+const router = useRouter();
+const route = useRoute();
+
+const searchQuery = ref<string>("");
+const selectedProviders = ref<string[]>([]);
+const selectedPlayerTypes = ref<string[]>([]);
+const selectedStatuses = ref<string[]>([]);
+
+let searchDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+let providersDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+let typesDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+let statusesDebounceTimeout: ReturnType<typeof setTimeout> | null = null;
+
+const providerOptions = computed(() =>
+  Object.values(api.providers)
+    .filter((x) => x.available && x.type === ProviderType.PLAYER)
+    .map((x) => ({
+      label: x.name || api.providerManifests[x.domain]?.name || x.domain,
+      value: x.instance_id,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label)),
+);
+
+const playerTypeOptions = computed(() => [
+  { label: $t("player_type.player"), value: PlayerType.PLAYER },
+  { label: $t("player_type.group"), value: PlayerType.GROUP },
+  { label: $t("player_type.stereo_pair"), value: PlayerType.STEREO_PAIR },
+  { label: $t("player_type.source"), value: PlayerType.SOURCE },
+]);
+
+const statusOptions = computed(() => [
+  { label: $t("settings.player_status.available"), value: "available" },
+  { label: $t("settings.player_status.needs_setup"), value: "needs_setup" },
+  { label: $t("settings.player_status.unavailable"), value: "unavailable" },
+  { label: $t("settings.player_status.disabled"), value: "disabled" },
+]);
+
+// Emits
+const emit = defineEmits<{
+  (e: "update:search", value: string): void;
+  (e: "update:providers", value: string[]): void;
+  (e: "update:types", value: string[]): void;
+  (e: "update:statuses", value: string[]): void;
+}>();
+
+const initializeFromUrl = function () {
+  if (route.query.search) {
+    searchQuery.value = route.query.search as string;
+  }
+
+  if (route.query.providers) {
+    const providers = route.query.providers as string;
+    selectedProviders.value = providers.split(",");
+  }
+
+  if (route.query.types) {
+    const types = route.query.types as string;
+    selectedPlayerTypes.value = types.split(",");
+  }
+
+  if (route.query.status) {
+    const statuses = route.query.status as string;
+    selectedStatuses.value = statuses.split(",");
+  }
+};
+
+watch(searchQuery, (newQuery) => {
+  emit("update:search", newQuery);
+
+  if (searchDebounceTimeout) {
+    clearTimeout(searchDebounceTimeout);
+  }
+  searchDebounceTimeout = setTimeout(() => {
+    const query = { ...route.query };
+    if (newQuery) {
+      query.search = newQuery;
+    } else {
+      delete query.search;
+    }
+    router.replace({ query });
+  }, 750);
+});
+
+watch(
+  selectedProviders,
+  (newProviders) => {
+    emit("update:providers", newProviders);
+
+    if (providersDebounceTimeout) {
+      clearTimeout(providersDebounceTimeout);
+    }
+    providersDebounceTimeout = setTimeout(() => {
+      const query = { ...route.query };
+      if (newProviders.length > 0) {
+        query.providers = newProviders.join(",");
+      } else {
+        delete query.providers;
+      }
+      router.replace({ query });
+    }, 750);
+  },
+  { deep: true },
+);
+
+watch(
+  selectedPlayerTypes,
+  (newTypes) => {
+    emit("update:types", newTypes);
+
+    if (typesDebounceTimeout) {
+      clearTimeout(typesDebounceTimeout);
+    }
+    typesDebounceTimeout = setTimeout(() => {
+      const query = { ...route.query };
+      if (newTypes.length > 0) {
+        query.types = newTypes.join(",");
+      } else {
+        delete query.types;
+      }
+      router.replace({ query });
+    }, 750);
+  },
+  { deep: true },
+);
+
+watch(
+  selectedStatuses,
+  (newStatuses) => {
+    emit("update:statuses", newStatuses);
+
+    if (statusesDebounceTimeout) {
+      clearTimeout(statusesDebounceTimeout);
+    }
+    statusesDebounceTimeout = setTimeout(() => {
+      const query = { ...route.query };
+      if (newStatuses.length > 0) {
+        query.status = newStatuses.join(",");
+      } else {
+        delete query.status;
+      }
+      router.replace({ query });
+    }, 750);
+  },
+  { deep: true },
+);
+
+initializeFromUrl();
+</script>
+
+<style scoped>
+.filters-container {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+:deep(.search-field) {
+  flex: 1 1 auto;
+  min-width: 250px;
+  max-width: 400px;
+}
+
+.filter-buttons {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 960px) {
+  .filters-container {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  :deep(.search-field) {
+    width: 100%;
+    min-width: 100%;
+  }
+
+  .filter-buttons {
+    width: 100%;
+  }
+}
+</style>

@@ -1,0 +1,124 @@
+import { computed, reactive } from "vue";
+import {
+  Player,
+  PlayerQueue,
+  ProviderType,
+  QueueItem,
+  Role,
+  ServerInfoMessage,
+  User,
+} from "./api/interfaces";
+
+import type { StoredState } from "@/components/ItemsListing.vue";
+import {
+  DEVICE_TYPE,
+  IS_TABLET_UA,
+  isTouchscreenDevice,
+  type DeviceType,
+} from "@/helpers/device";
+import { isHomeAssistantIngressSession } from "@/helpers/ingress";
+import { parseBool } from "@/helpers/parse";
+import api from "./api";
+import { resolvePlayerQueue } from "./api/helpers";
+
+import { isPhoneSizedScreen } from "./breakpoint";
+
+interface Store {
+  activePlayerId?: string;
+  showPlayersMenu: boolean;
+  showFullscreenPlayer: boolean;
+  frameless: boolean;
+  showQueueItems: boolean;
+  apiInitialized: boolean;
+  apiBaseUrl: string;
+  dialogActive: boolean;
+  readonly activePlayer?: Player;
+  readonly activePlayerQueue?: PlayerQueue;
+  readonly curQueueItem?: QueueItem;
+  prevState?: StoredState;
+  libraryArtistsCount?: number;
+  libraryAlbumsCount?: number;
+  libraryTracksCount?: number;
+  libraryPlaylistsCount?: number;
+  libraryRadiosCount?: number;
+  libraryPodcastsCount?: number;
+  libraryAudiobooksCount?: number;
+  libraryGenresCount?: number;
+  isTouchscreen: boolean;
+  deviceType: DeviceType;
+  forceMobileLayout?: boolean;
+  readonly mobileLayout: boolean;
+  currentUser?: User;
+  // the user roles, the builtin ones first (see loadRoles)
+  roles: Role[];
+  // the scopes granted to each user role, keyed by role id
+  roleScopes: Record<string, string[]>;
+  serverInfo?: ServerInfoMessage;
+  readonly isIngressSession: boolean;
+  readonly enabledPlugins: ReadonlySet<string>;
+  isPartyGuest: boolean;
+  companionPlayerId?: string;
+  navMenuEditMode: boolean;
+}
+
+export const store: Store = reactive({
+  activePlayerId: undefined,
+  showPlayersMenu: false,
+  showFullscreenPlayer: false,
+  frameless: false,
+  showQueueItems: false,
+  apiInitialized: false,
+  apiBaseUrl: "",
+  dialogActive: false,
+  activePlayer: computed(() => {
+    if (store.activePlayerId && store.activePlayerId in api.players) {
+      return api.players[store.activePlayerId];
+    }
+    return undefined;
+  }),
+  activePlayerQueue: computed(() => resolvePlayerQueue(store.activePlayer)),
+  curQueueItem: computed(() => {
+    if (store.activePlayerQueue && store.activePlayerQueue.active)
+      return store.activePlayerQueue.current_item ?? undefined;
+    return undefined;
+  }),
+  prevState: undefined,
+  libraryArtistsCount: undefined,
+  libraryAlbumsCount: undefined,
+  libraryTracksCount: undefined,
+  libraryPlaylistsCount: undefined,
+  libraryRadiosCount: undefined,
+  libraryGenresCount: undefined,
+  isTouchscreen: isTouchscreenDevice(),
+  deviceType: DEVICE_TYPE,
+  // a tablet has the screen for a desktop layout and is laid out for touch all
+  // the same, so it is taken at its word rather than measured
+  mobileLayout: computed(
+    () =>
+      isPhoneSizedScreen() ||
+      IS_TABLET_UA ||
+      parseBool(store.forceMobileLayout),
+  ),
+  currentUser: undefined,
+  roles: [],
+  roleScopes: {},
+  serverInfo: undefined,
+  isIngressSession: computed(() =>
+    isHomeAssistantIngressSession(api.serverInfo.value),
+  ),
+  // the loaded plugins, which every role may list; their configs would take
+  // config.providers.read, and a plugin that isn't loaded can't serve its page
+  enabledPlugins: computed(
+    () =>
+      new Set(
+        Object.values(api.providers)
+          .filter(
+            (provider) =>
+              provider.type === ProviderType.PLUGIN && provider.available,
+          )
+          .map((provider) => provider.domain),
+      ),
+  ),
+  isPartyGuest: false,
+  navMenuEditMode: false,
+});

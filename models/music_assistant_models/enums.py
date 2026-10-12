@@ -1,0 +1,1098 @@
+"""All enums used by the Music Assistant models."""
+
+from __future__ import annotations
+
+import contextlib
+from enum import EnumType, StrEnum
+
+
+class MediaTypeMeta(EnumType):
+    """Class properties for MediaType."""
+
+    @property
+    def ALL(cls) -> list[MediaType]:  # noqa: N802
+        """All MediaTypes."""
+        return [
+            MediaType.ARTIST,
+            MediaType.ALBUM,
+            MediaType.TRACK,
+            MediaType.PLAYLIST,
+            MediaType.RADIO,
+            MediaType.AUDIOBOOK,
+            MediaType.PODCAST,
+            MediaType.GENRE,
+        ]
+
+
+class MediaType(StrEnum, metaclass=MediaTypeMeta):
+    """Enum for MediaType."""
+
+    ARTIST = "artist"
+    ALBUM = "album"
+    TRACK = "track"
+    PLAYLIST = "playlist"
+    RADIO = "radio"
+    AUDIOBOOK = "audiobook"
+    PODCAST = "podcast"
+    PODCAST_EPISODE = "podcast_episode"
+    FOLDER = "folder"
+    COLLECTION = "collection"
+    ANNOUNCEMENT = "announcement"
+    FLOW_STREAM = "flow_stream"
+    # deprecated: replaced by AUDIO_SOURCE, kept for one release for backwards compatibility
+    PLUGIN_SOURCE = "plugin_source"
+    AUDIO_SOURCE = "audio_source"
+    SOUND_EFFECT = "sound_effect"
+    GENRE = "genre"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> MediaType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class DashboardType(StrEnum):
+    """Enum with the dashboards that can be cast to a display device."""
+
+    PARTY = "party"
+    NOW_PLAYING = "now_playing"
+    MUSIC_QUIZ = "music_quiz"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> DashboardType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class SourceControl(StrEnum):
+    """Control actions issued to a live AudioSource by the player controller."""
+
+    PLAY = "play"
+    PAUSE = "pause"
+    NEXT = "next"
+    PREVIOUS = "previous"
+    SEEK = "seek"
+    STOP = "stop"
+    SHUFFLE = "shuffle"
+    REPEAT = "repeat"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> SourceControl:  # noqa: ARG003
+        """Return UNKNOWN if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ExternalID(StrEnum):
+    """Enum with External ID types."""
+
+    MB_ARTIST = "musicbrainz_artistid"  # MusicBrainz Artist ID (or AlbumArtist ID)
+    MB_ALBUM = "musicbrainz_albumid"  # MusicBrainz Album ID
+    MB_RELEASEGROUP = "musicbrainz_releasegroupid"  # MusicBrainz ReleaseGroupID
+    MB_TRACK = "musicbrainz_trackid"  # MusicBrainz Track ID
+    MB_RECORDING = "musicbrainz_recordingid"  # MusicBrainz Recording ID
+
+    ISRC = "isrc"  # used to identify unique recordings
+    BARCODE = "barcode"  # EAN-13 barcode for identifying albums
+    ACOUSTID = "acoustid"  # unique fingerprint (id) for a recording
+    ASIN = "asin"  # amazon unique number to identify albums
+    DISCOGS = "discogs"  # id for media item on discogs
+    TADB = "tadb"  # the audio db id
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ExternalID:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+    @property
+    def is_unique(self) -> bool:
+        """Return if the ExternalID is unique."""
+        return self.is_musicbrainz or self in (
+            ExternalID.ACOUSTID,
+            ExternalID.DISCOGS,
+            ExternalID.TADB,
+        )
+
+    @property
+    def is_musicbrainz(self) -> bool:
+        """Return if the ExternalID is a MusicBrainz identifier."""
+        return self in (
+            ExternalID.MB_RELEASEGROUP,
+            ExternalID.MB_ALBUM,
+            ExternalID.MB_TRACK,
+            ExternalID.MB_ARTIST,
+            ExternalID.MB_RECORDING,
+        )
+
+
+class LinkType(StrEnum):
+    """Enum with link types."""
+
+    WEBSITE = "website"
+    FACEBOOK = "facebook"
+    TWITTER = "twitter"
+    LASTFM = "lastfm"
+    YOUTUBE = "youtube"
+    INSTAGRAM = "instagram"
+    SNAPCHAT = "snapchat"
+    TIKTOK = "tiktok"
+    DISCOGS = "discogs"
+    WIKIPEDIA = "wikipedia"
+    ALLMUSIC = "allmusic"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> LinkType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ImageType(StrEnum):
+    """Enum with image types."""
+
+    THUMB = "thumb"
+    LANDSCAPE = "landscape"
+    FANART = "fanart"
+    LOGO = "logo"
+    CLEARART = "clearart"
+    BANNER = "banner"
+    CUTOUT = "cutout"
+    BACK = "back"
+    DISCART = "discart"
+    OTHER = "other"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ImageType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.OTHER
+
+
+class AlbumType(StrEnum):
+    """Enum for Album type."""
+
+    ALBUM = "album"
+    SINGLE = "single"
+    LIVE = "live"
+    SOUNDTRACK = "soundtrack"
+    COMPILATION = "compilation"
+    EP = "ep"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> AlbumType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class RecommendationFolderType(StrEnum):
+    """Enum for RecommendationFolder type."""
+
+    DEFAULT = "default"
+    TIMELINE = "timeline"
+
+    @classmethod
+    def _missing_(cls, value: object) -> RecommendationFolderType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.DEFAULT
+
+
+class PlaylistMatchPolicy(StrEnum):
+    """Enum with playlist track match policies, from strictest to loosest.
+
+    Controls how loosely a substitute track may be matched on another provider once
+    a playlist entry's original source is confirmed unavailable.
+    """
+
+    EXACT = "exact"
+    SAME_RECORDING = "same_recording"
+    BEST_EFFORT = "best_effort"
+
+
+class ArtistType(StrEnum):
+    """Enum for Artist type."""
+
+    SINGER = "singer"  # regular music artist
+    AUTHOR = "author"  # author of an audiobook
+    NARRATOR = "narrator"  # narrator of an audiobook
+    UNKNOWN = "unknown"
+
+
+class ArtistEntityType(StrEnum):
+    """Enum for Artist entity type (mirrors MusicBrainz artist type)."""
+
+    PERSON = "person"  # individual person
+    GROUP = "group"  # music group
+    ORCHESTRA = "orchestra"  # orchestra
+    CHOIR = "choir"  # choir
+    CHARACTER = "character"  # fictional character
+    OTHER = "other"  # other
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ArtistEntityType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ContentType(StrEnum):
+    """Enum with audio content/container types supported by ffmpeg."""
+
+    # --- Containers ---
+    OGG = "ogg"  # Ogg container (Vorbis/Opus/FLAC)
+    WAV = "wav"  # WAV container (usually PCM)
+    AIFF = "aiff"  # AIFF container
+    MPEG = "mpeg"  # MPEG-PS/MPEG-TS container
+    M4A = "m4a"  # MPEG-4 Audio (AAC/ALAC)
+    MP4 = "mp4"  # MPEG-4 container
+    MP4A = "mp4a"  # MPEG-4 Audio (AAC/ALAC)
+    M4B = "m4b"  # MPEG-4 Audiobook
+    DSF = "dsf"  # DSD Stream File
+
+    # --- Can both be a container and codec ---
+    FLAC = "flac"  # FLAC lossless audio
+    MP3 = "mp3"  # MPEG-1 Audio Layer III
+    WMA = "wma"  # Windows Media Audio
+    WMAV2 = "wmav2"  # Windows Media Audio v2
+    WMAPRO = "wmapro"  # Windows Media Audio Professional
+    WMALOSSLESS = "wmalossless"  # Windows Media Audio Lossless
+    WAVPACK = "wavpack"  # WavPack lossless
+    TAK = "tak"  # Tom's Lossless Audio Kompressor
+    APE = "ape"  # Monkey's Audio
+    MUSEPACK = "mpc"  # MusePack
+
+    # --- Codecs ---
+    AAC = "aac"  # Advanced Audio Coding
+    ALAC = "alac"  # Apple Lossless Audio Codec
+    OPUS = "opus"  # Opus audio codec
+    VORBIS = "vorbis"  # Ogg Vorbis compression
+    AC3 = "ac3"  # Dolby Digital (common in DVDs)
+    EAC3 = "eac3"  # Dolby Digital Plus (streaming/4K)
+    DTS = "dts"  # Digital Theater System
+    TRUEHD = "truehd"  # Dolby TrueHD (lossless)
+    DTSHD = "dtshd"  # DTS-HD Master Audio
+    DTSX = "dtsx"  # DTS:X immersive audio
+    COOK = "cook"  # RealAudio Cook Codec
+    RA_144 = "ralf"  # RealAudio Lossless
+    MP2 = "mp2"  # MPEG-1 Audio Layer II
+    MP1 = "mp1"  # MPEG-1 Audio Layer I
+    DRA = "dra"  # Chinese Digital Rise Audio
+    ATRAC3 = "atrac3"  # Sony MiniDisc format
+
+    # --- PCM Codecs ---
+    PCM_S16LE = "s16le"  # PCM 16-bit little-endian
+    PCM_S24LE = "s24le"  # PCM 24-bit little-endian
+    PCM_S32LE = "s32le"  # PCM 32-bit little-endian
+    PCM_F32LE = "f32le"  # PCM 32-bit float
+    PCM_F64LE = "f64le"  # PCM 64-bit float
+    PCM_S16BE = "s16be"  # PCM 16-bit big-endian
+    PCM_S24BE = "s24be"  # PCM 24-bit big-endian
+    PCM_S32BE = "s32be"  # PCM 32-bit big-endian
+    PCM_BLURAY = "pcm_bluray"  # Blu-ray specific PCM
+    PCM_DVD = "pcm_dvd"  # DVD specific PCM
+
+    # --- ADPCM Codecs ---
+    ADPCM_IMA = "adpcm_ima_qt"  # QuickTime variant
+    ADPCM_MS = "adpcm_ms"  # Microsoft variant
+    ADPCM_SWF = "adpcm_swf"  # Flash audio
+
+    # --- PDM Codecs ---
+    DSD_LSBF = "dsd_lsbf"  # DSD least-significant-bit first
+    DSD_MSBF = "dsd_msbf"  # DSD most-significant-bit first
+    DSD_LSBF_PLANAR = "dsd_lsbf_planar"  # DSD planar least-significant-bit first
+    DSD_MSBF_PLANAR = "dsd_msbf_planar"  # DSD planar most-significant-bit first
+
+    # --- Voice Codecs ---
+    AMR = "amr_nb"  # Adaptive Multi-Rate Narrowband, voice codec
+    AMR_WB = "amr_wb"  # Adaptive Multi-Rate Wideband, voice codec
+    SPEEX = "speex"  # Open-source voice codec, voice codec
+    PCM_ALAW = "alaw"  # G.711 A-law, voice codec
+    PCM_MULAW = "mulaw"  # G.711 µ-law, voice codec
+    G722 = "g722"  # ITU-T 7 kHz audio
+    G726 = "g726"  # ADPCM telephone quality
+
+    # --- Special ---
+    PCM = "pcm"  # PCM generic (details determined later)
+    NUT = "nut"  # NUT container (ffmpeg)
+    UNKNOWN = "?"  # Unknown type
+
+    @classmethod
+    def _missing_(cls, value: object) -> ContentType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+    @classmethod
+    def try_parse(cls, string: str) -> ContentType:
+        """Try to parse ContentType from (url)string/extension."""
+        tempstr = string.lower()
+        if "audio/" in tempstr:
+            tempstr = tempstr.split("/")[1]
+        for splitter in (".", ","):
+            if splitter in tempstr:
+                for val in tempstr.split(splitter):
+                    with contextlib.suppress(ValueError):
+                        parsed = cls(val.strip())
+                    if parsed != ContentType.UNKNOWN:
+                        return parsed
+        tempstr = tempstr.split("?")[0]
+        tempstr = tempstr.split("&")[0]
+        tempstr = tempstr.split(";")[0]
+        tempstr = tempstr.replace("wv", "wavpack")
+        tempstr = tempstr.replace("pcm_", "")
+        try:
+            return cls(tempstr)
+        except ValueError:
+            return cls.UNKNOWN
+
+    def is_pcm(self) -> bool:
+        """Return if contentype is PCM."""
+        return self.name.startswith("PCM")
+
+    def is_lossless(self) -> bool:
+        """Return if format is lossless."""
+        return self.is_pcm() or self in (
+            ContentType.DSF,
+            ContentType.FLAC,
+            ContentType.AIFF,
+            ContentType.WAV,
+            ContentType.ALAC,
+            ContentType.WAVPACK,
+            ContentType.TAK,
+            ContentType.APE,
+            ContentType.WMALOSSLESS,
+            ContentType.TRUEHD,
+            ContentType.DSD_LSBF,
+            ContentType.DSD_MSBF,
+            ContentType.DSD_LSBF_PLANAR,
+            ContentType.DSD_MSBF_PLANAR,
+            ContentType.RA_144,
+        )
+
+    @classmethod
+    def from_bit_depth(cls, bit_depth: int, floating_point: bool = False) -> ContentType:
+        """Return (PCM) Contenttype from PCM bit depth."""
+        if floating_point and bit_depth > 32:
+            return cls.PCM_F64LE
+        if floating_point:
+            return cls.PCM_F32LE
+        if bit_depth == 16:
+            return cls.PCM_S16LE
+        if bit_depth == 24:
+            return cls.PCM_S24LE
+        return cls.PCM_S32LE
+
+
+class QueueOption(StrEnum):
+    """Enum representation of the queue (play) options.
+
+    - PLAY -> Insert new item(s) in queue at the current position and start playing.
+    - REPLACE -> Replace entire queue contents with the new items and start playing from index 0.
+    - NEXT -> Insert item(s) after current playing/buffered item.
+    - REPLACE_NEXT -> Replace item(s) after current playing/buffered item.
+    - ADD -> Add new item(s) to the queue (at the end if shuffle is not enabled).
+    """
+
+    PLAY = "play"
+    REPLACE = "replace"
+    NEXT = "next"
+    REPLACE_NEXT = "replace_next"
+    ADD = "add"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> QueueOption:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class RepeatMode(StrEnum):
+    """Enum with repeat modes."""
+
+    OFF = "off"  # no repeat at all
+    ONE = "one"  # repeat one/single track
+    ALL = "all"  # repeat entire queue
+
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> RepeatMode:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class CrossfadeMode(StrEnum):
+    """Enum with crossfade modes for a queue."""
+
+    SMART_CROSSFADE = "smart_crossfade"  # Use smart crossfade with beat matching and EQ filters
+    STANDARD_CROSSFADE = "standard_crossfade"  # Use standard crossfade only
+    # Applied by the server for an item that declares a tail overlap; never a user setting.
+    VOICE_OVER = "voice_over"  # Spoken tail over the next item's start, that item ducked under it
+    DISABLED = "disabled"  # No crossfade
+    # The source crossfades its own playback, so the server does not. Distinct
+    # from DISABLED, which means nothing is crossfading at all.
+    SOURCE = "source"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> CrossfadeMode:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+# alias for backwards compatibility
+SmartFadesMode = CrossfadeMode
+
+
+class PlaybackState(StrEnum):
+    """Enum for the (playback)state of a player."""
+
+    IDLE = "idle"
+    PAUSED = "paused"
+    PLAYING = "playing"
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> PlaybackState:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+# alias for backwards compatibility
+PlayerState = PlaybackState
+
+
+class PlayerType(StrEnum):
+    """Enum with possible Player Types.
+
+    player: A regular player with native (vendor-specific) support.
+    stereo_pair: Same as player but a dedicated stereo pair of 2 speakers.
+    group: A (dedicated) (sync)group player or (universal) playergroup.
+    protocol: A generic protocol player (e.g. AirPlay/Chromecast/DLNA) without native support.
+              These are wrapped by a Universal Player and hidden from the UI.
+    display: A display-only device that shows metadata (e.g. album art, track info)
+             but does not play audio.
+    visualizer: A device that visualizes music on a screen (e.g. animations, LED matrices).
+    light: A device that visualizes music through lighting (e.g. Hue sync, WLED).
+    source: A capture-only device that provides audio input (e.g. a line-in client)
+            but does not render audio itself.
+    """
+
+    PLAYER = "player"
+    STEREO_PAIR = "stereo_pair"
+    GROUP = "group"
+    PROTOCOL = "protocol"
+    DISPLAY = "display"
+    VISUALIZER = "visualizer"
+    LIGHT = "light"
+    SOURCE = "source"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> PlayerType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class IdentifierType(StrEnum):
+    """
+    Types of identifiers/connections for a device.
+
+    Also used to match protocol players to their parent device.
+    Ordered by reliability (MAC_ADDRESS most reliable).
+    """
+
+    MAC_ADDRESS = "mac_address"  # Most reliable - e.g., "AA:BB:CC:DD:EE:FF"
+    SERIAL_NUMBER = "serial_number"  # Device serial number
+    UUID = "uuid"  # Universal unique identifier
+    CAST_UUID = "cast_uuid"  # Chromecast device UUID (for cross-protocol matching)
+    AIRPLAY_ID = "airplay_id"  # AirPlay device identifier (for cross-protocol matching)
+    IP_ADDRESS = "ip_address"  # Less reliable (DHCP) but useful for fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> IdentifierType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class PlayerFeature(StrEnum):
+    """Enum with possible Player features.
+
+    power: The player has a native/dedicated power control.
+    volume: The player supports adjusting the volume.
+    mute: The player supports muting the volume.
+    set_members: The player supports grouping with other players.
+    multi_device_dsp: The player supports per-device DSP when grouped.
+    accurate_time: The player provides millisecond accurate timing information.
+    seek: The player supports seeking to a specific.
+    enqueue: The player supports (en)queuing of media items natively.
+    select_source: The player has native support for selecting a source.
+    select_sound_mode: The player has native support for selecting a sound mode.
+    options: The player supports getting/setting additional options.
+    gapless_playback: The player supports gapless playback.
+    gapless_different_samplerate: Supports gapless playback between different samplerates.
+    """
+
+    POWER = "power"
+    VOLUME_SET = "volume_set"
+    VOLUME_MUTE = "volume_mute"
+    PAUSE = "pause"
+    SET_MEMBERS = "set_members"
+    MULTI_DEVICE_DSP = "multi_device_dsp"
+    SEEK = "seek"
+    NEXT_PREVIOUS = "next_previous"
+    PLAY_ANNOUNCEMENT = "play_announcement"
+    ENQUEUE = "enqueue"
+    SELECT_SOUND_MODE = "select_sound_mode"
+    SELECT_SOURCE = "select_source"
+    OPTIONS = "options"
+    GAPLESS_PLAYBACK = "gapless_playback"
+    GAPLESS_DIFFERENT_SAMPLERATE = "gapless_different_samplerate"
+    # Play media: indicates the player can handle play_media commands directly
+    # If not present, play_media will be routed through linked protocol players
+    PLAY_MEDIA = "play_media"
+
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> PlayerFeature:
+        """Set default enum member if an unknown value is provided."""
+        if value == "sync":
+            # sync is deprecated, use set_members instead
+            return cls.SET_MEMBERS
+        return cls.UNKNOWN
+
+
+class TaskScheduleType(StrEnum):
+    """Enumeration of supported task schedule types."""
+
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> TaskScheduleType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class TaskStatus(StrEnum):
+    """Enumeration of background task states.
+
+    `PARTIAL_SUCCESS` means the task completed without a fatal exception, but one or more
+    non-fatal issues were reported during the run.
+    """
+
+    IDLE = "idle"
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL_SUCCESS = "partial_success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> TaskStatus:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class EventType(StrEnum):
+    """Enum with possible Events."""
+
+    PLAYER_ADDED = "player_added"
+    PLAYER_UPDATED = "player_updated"
+    PLAYER_REMOVED = "player_removed"
+    PLAYER_CONFIG_UPDATED = "player_config_updated"
+    PLAYER_DSP_CONFIG_UPDATED = "player_dsp_config_updated"
+    PLAYER_OPTIONS_UPDATED = "player_options_updated"
+    PLAYER_SLEEP_TIMER_UPDATED = "player_sleep_timer_updated"
+    DSP_PRESETS_UPDATED = "dsp_presets_updated"
+    DSP_IRS_UPDATED = "dsp_irs_updated"
+    QUEUE_ADDED = "queue_added"
+    QUEUE_UPDATED = "queue_updated"
+    QUEUE_ITEMS_UPDATED = "queue_items_updated"
+    QUEUE_TIME_UPDATED = "queue_time_updated"
+    MEDIA_ITEM_PLAYED = "media_item_played"
+    MEDIA_ITEM_ADDED = "media_item_added"
+    MEDIA_ITEM_UPDATED = "media_item_updated"
+    MEDIA_ITEM_DELETED = "media_item_deleted"
+    # one user's like/dislike/unset on one item changed; data is a FavoriteUpdate,
+    # object_id is the item uri
+    FAVORITE_UPDATED = "favorite_updated"
+    PLAYLOG_UPDATED = "playlog_updated"
+    PROVIDERS_UPDATED = "providers_updated"
+    # generic event emitted by a provider instance;
+    # object_id = provider instance_id (optionally suffixed with /sub_scope),
+    # data = provider-defined payload
+    PROVIDER_EVENT = "provider_event"
+    # setup_flow_updated: a running setup flow produced a new/updated step;
+    # object_id is the flow_id
+    SETUP_FLOW_UPDATED = "setup_flow_updated"
+    SYNC_TASKS_UPDATED = "sync_tasks_updated"
+    TASKS_UPDATED = "tasks_updated"
+    DASHBOARD_SHOW = "dashboard_show"
+    DASHBOARD_HIDE = "dashboard_hide"
+    DASHBOARDS_UPDATED = "dashboards_updated"
+    DASHBOARD_SESSIONS_UPDATED = "dashboard_sessions_updated"
+    MUSIC_SYNC_COMPLETED = "music_sync_completed"
+    AUTH_SESSION = "auth_session"
+    CORE_STATE_UPDATED = "core_state_updated"
+    SHUTDOWN = "application_shutdown"  # deprecated: replaced by "core_state_updated"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> EventType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ProviderFeature(StrEnum):
+    """Enum with features for a Provider."""
+
+    #
+    # MUSICPROVIDER FEATURES
+    #
+
+    # browse/explore/recommendations
+    BROWSE = "browse"
+    SEARCH = "search"
+    RECOMMENDATIONS = "recommendations"
+
+    # if the provider requires calls beyond searching to get other album versions
+    ALBUM_VERSIONS = "album_versions"
+
+    # library feature per mediatype
+    LIBRARY_ARTISTS = "library_artists"
+    LIBRARY_ALBUMS = "library_albums"
+    LIBRARY_TRACKS = "library_tracks"
+    LIBRARY_PLAYLISTS = "library_playlists"
+    LIBRARY_RADIOS = "library_radios"
+    LIBRARY_AUDIOBOOKS = "library_audiobooks"
+    LIBRARY_PODCASTS = "library_podcasts"
+
+    # additional library features
+    AUTHOR_AUDIOBOOKS = "author_audiobooks"
+    NARRATOR_AUDIOBOOKS = "narrator_audiobooks"
+
+    # if we can grab all albums for an artist from the music provider
+    ARTIST_ALBUMS = "artist_albums"
+
+    # if we can grab all tracks for an artist from the music provider
+    ARTIST_TRACKS = "artist_tracks"
+
+    # if we can grab 'top tracks' for an artist from the music/metadata provider
+    ARTIST_TOPTRACKS = "artist_toptracks"
+
+    # if we can grab 'top albums' for an artist from the music/metadata provider
+    ARTIST_TOPALBUMS = "artist_topalbums"
+
+    # library edit (=add/remove) feature per mediatype
+    LIBRARY_ARTISTS_EDIT = "library_artists_edit"
+    LIBRARY_ALBUMS_EDIT = "library_albums_edit"
+    LIBRARY_TRACKS_EDIT = "library_tracks_edit"
+    LIBRARY_PLAYLISTS_EDIT = "library_playlists_edit"
+    LIBRARY_RADIOS_EDIT = "library_radios_edit"
+    LIBRARY_AUDIOBOOKS_EDIT = "library_audiobooks_edit"
+    LIBRARY_PODCASTS_EDIT = "library_podcasts_edit"
+
+    # favorites editing per mediatype
+    FAVORITE_ARTISTS_EDIT = "favorite_artists_edit"
+    FAVORITE_ALBUMS_EDIT = "favorite_albums_edit"
+    FAVORITE_TRACKS_EDIT = "favorite_tracks_edit"
+    FAVORITE_PLAYLISTS_EDIT = "favorite_playlists_edit"
+    FAVORITE_RADIOS_EDIT = "favorite_radios_edit"
+    FAVORITE_AUDIOBOOKS_EDIT = "favorite_audiobooks_edit"
+    FAVORITE_PODCASTS_EDIT = "favorite_podcasts_edit"
+
+    # if we can grab 'similar tracks' from the music provider or plugin
+    # used to generate dynamic playlists
+    SIMILAR_TRACKS = "similar_tracks"
+
+    # Plugins or Music sources can provide a list of similar artists we
+    # can show in the UI.
+    SIMILAR_ARTISTS = "similar_artists"
+
+    # lookup by external ID (ISRC, MusicBrainz, etc.) per mediatype
+    TRACK_BY_EXTERNAL_ID = "track_by_external_id"
+    ALBUM_BY_EXTERNAL_ID = "album_by_external_id"
+    ARTIST_BY_EXTERNAL_ID = "artist_by_external_id"
+
+    # playlist-specific features
+    PLAYLIST_TRACKS_EDIT = "playlist_tracks_edit"
+    PLAYLIST_TRACKS_MOVE = "playlist_tracks_move"  # tracks of a playlist can be reordered
+    # PLAYLIST_CREATE is deprecated: replaced by PLAYLIST_CREATE_TRACKS (and others)
+    # TODO: remove this after 2.8 release
+    PLAYLIST_CREATE = "playlist_create"
+    PLAYLIST_CREATE_TRACKS = "playlist_create_tracks"  # creation of playlist with tracks supported
+    PLAYLIST_CREATE_AUDIOBOOKS = "playlist_create_audiobooks"  # with audiobooks
+    PLAYLIST_CREATE_PODCAST_EPISODES = "playlist_create_podcast_episodes"  # with podcast episodes
+    PLAYLIST_CREATE_RADIOS = "playlist_create_radios"  # with radios
+    PLAYLIST_CREATE_MIXED = "playlist_create_mixed"  # media types of created playlist may be mixed
+
+    #
+    # PLAYERPROVIDER FEATURES
+    #
+    SYNC_PLAYERS = "sync_players"
+    REMOVE_PLAYER = "remove_player"
+    CREATE_GROUP_PLAYER = "create_group_player"
+    REMOVE_GROUP_PLAYER = "remove_group_player"
+
+    #
+    # METADATAPROVIDER FEATURES
+    #
+    ARTIST_METADATA = "artist_metadata"
+    ALBUM_METADATA = "album_metadata"
+    TRACK_METADATA = "track_metadata"
+    PLAYLIST_METADATA = "playlist_metadata"
+    LYRICS = "lyrics"  # lyrics support - can also be provided by a music provider
+
+    #
+    # PLUGIN FEATURES
+    #
+    AUDIO_SOURCE = "audio_source"
+    # provider can enumerate sound effect items (live, not library-backed)
+    SOUND_EFFECTS = "sound_effects"
+    # provider records playback to an external listening history
+    SCROBBLE = "scrobble"
+
+    #
+    # OTHER FEATURES (plugin-only)
+    #
+    AI_QUERY = "ai_query"  # provider can handle AI queries (e.g. by calling an LLM)
+    TTS = "tts"  # provider can handle text-to-speech requests
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ProviderFeature:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ProviderSharing(StrEnum):
+    """Who, besides its owner, a provider instance is shared with."""
+
+    # only the owner
+    PRIVATE = "private"
+    # the owner plus the users listed on the access record
+    SELECTED = "selected"
+    # every signed-in household member, guests excluded
+    MEMBERS = "members"
+    # every user, guests included
+    EVERYONE = "everyone"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ProviderSharing:  # noqa: ARG003
+        """Fall back to PRIVATE (the safest value) for an unknown sharing mode."""
+        return cls.PRIVATE
+
+
+class ProviderType(StrEnum):
+    """Enum with supported provider types."""
+
+    MUSIC = "music"
+    PLAYER = "player"
+    METADATA = "metadata"
+    PLUGIN = "plugin"
+    CORE = "core"
+    AUDIO_ANALYSIS = "audio_analysis"
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ProviderType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class ConfigEntryType(StrEnum):
+    """Enum for the type of a config entry."""
+
+    BOOLEAN = "boolean"
+    STRING = "string"
+    SECURE_STRING = "secure_string"
+    INTEGER = "integer"
+    FLOAT = "float"
+    LABEL = "label"
+    SPLITTED_STRING = "splitted_string"
+    DIVIDER = "divider"
+    ACTION = "action"
+    ICON = "icon"
+    ALERT = "alert"
+    IMAGE = "image"
+    # url: a clickable link; when returned from a config invoke_action response,
+    # the frontend opens the value (one-shot) instead of rendering a field
+    URL = "url"
+    # pairing_code: a short code (PIN) shown on a device that the user copies over
+    # during pairing; the entry's `format` field describes its shape
+    PAIRING_CODE = "pairing_code"
+    # folder: a folder on the server, picked from the storage locations; the value is
+    # its absolute path. A client without a folder picker shows a text field
+    FOLDER = "folder"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ConfigEntryType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class FlowStepType(StrEnum):
+    """Enum with the possible types of a setup flow step."""
+
+    # form: render config entries and wait for the user to submit
+    FORM = "form"
+
+    # external: the user must open an external url (e.g. OAuth);
+    # the server advances the flow on the callback
+    EXTERNAL = "external"
+
+    # progress: the server is working/waiting on something; no user input
+    PROGRESS = "progress"
+
+    # finish: the flow completed; result references the created/updated object
+    FINISH = "finish"
+
+    # abort: the flow ended without a result
+    ABORT = "abort"
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> FlowStepType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class StreamType(StrEnum):
+    """Enum for the type of streamdetails."""
+
+    # http: regular http stream - url provided in path
+    HTTP = "http"
+
+    # encrypted_http: encrypted http stream - url and decryption_key are provided
+    ENCRYPTED_HTTP = "encrypted_http"  # encrypted http stream
+
+    # hls: http HLS stream - url provided in path
+    HLS = "hls"
+
+    # icy: http/1.1 stream with icy metadata - url provided in path
+    ICY = "icy"
+
+    # shoutcast: legacy shoutcast stream - url provided in path
+    SHOUTCAST = "shoutcast"
+
+    # in_band: radio stream with in-band metadata
+    # (e.g. ogg vorbis comments, flac metadata blocks, opus tags)
+    IN_BAND = "in_band"
+
+    # local_file: local file which is accessible by the MA server process
+    LOCAL_FILE = "local_file"
+
+    # named_pipe: named pipe (fifo) which is accessible by the MA server process
+    NAMED_PIPE = "named_pipe"
+
+    # other_ffmpeg: any other ffmpeg compatible input stream (used together with extra_input_args)
+    OTHER_FFMPEG = "other_ffmpeg"
+
+    # custom: custom (bytes) stream - provided by an (async) generator
+    CUSTOM = "custom"
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> StreamType:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class VolumeNormalizationMode(StrEnum):
+    """Enum with possible VolumeNormalization modes."""
+
+    DISABLED = "disabled"
+    DYNAMIC = "dynamic"
+    MEASUREMENT_ONLY = "measurement_only"
+    FALLBACK_FIXED_GAIN = "fallback_fixed_gain"
+    FIXED_GAIN = "fixed_gain"
+    FALLBACK_DYNAMIC = "fallback_dynamic"
+    # The source delivers its audio at a loudness target of its own, so the
+    # server leaves the level alone. Distinct from DISABLED, which means nothing
+    # normalized it at all: this audio is normalized, just not by us.
+    SOURCE = "source"
+
+    # fallback
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def _missing_(cls, value: object) -> VolumeNormalizationMode:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.UNKNOWN
+
+
+class HidePlayerOption(StrEnum):
+    """Enum with possible HidePlayer options."""
+
+    NEVER = "never"
+
+    # when_off: hide player in the UI when it is off
+    WHEN_OFF = "when_off"
+
+    # when_group_active: hide player in the UI when its active in any groups
+    WHEN_GROUP_ACTIVE = "when_group_active"
+
+    # when_synced: hide player in the UI when it is synced to another player
+    WHEN_SYNCED = "when_synced"
+
+    # when_unavailable: hide player in the UI when it is unavailable
+    WHEN_UNAVAILABLE = "when_unavailable"
+
+    # always: always hide the player in the UI
+    ALWAYS = "always"
+
+    @classmethod
+    def _missing_(cls, value: object) -> HidePlayerOption:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.NEVER
+
+
+class ProviderStage(StrEnum):
+    """Enum with possible Provider (development/stability) stages."""
+
+    # alpha: early development stage, not ready for production use
+    ALPHA = "alpha"
+
+    # beta: feature complete, but not fully tested, may contain bugs
+    BETA = "beta"
+
+    # stable: fully tested and ready for production use
+    STABLE = "stable"
+
+    # experimental: not stable, may change at any time, not recommended for production use
+    # often indicates a provider that is in heavy development or is based on reverse engineering
+    # or breaks often due to upstream changes
+    EXPERIMENTAL = "experimental"
+
+    # unmaintained: no longer maintained, no longer receiving updates or support
+    # looking for a community maintainer - the provider may not work in the future
+    UNMAINTAINED = "unmaintained"
+
+    # deprecated: no longer supported, will be removed in the future
+    DEPRECATED = "deprecated"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ProviderStage:  # noqa: ARG003
+        """Set default enum member if an unknown value is provided."""
+        return cls.STABLE
+
+
+class ProviderIconVariant(StrEnum):
+    """Enum of provider icon variants that a provider can supply."""
+
+    DEFAULT = "default"
+    DARK = "dark"
+    MONOCHROME = "monochrome"
+
+
+class CoreState(StrEnum):
+    """Enum representing the core state of the Music Assistant server."""
+
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+
+
+class ProviderStatus(StrEnum):
+    """
+    Enum representing the load/lifecycle status of a provider (instance).
+
+    Derived server-side from the provider's config and (when present) its loaded instance.
+    Runtime reachability of a loaded provider is conveyed separately by ProviderInstance.available.
+    """
+
+    # loaded: setup succeeded; a live instance exists
+    LOADED = "loaded"
+    # loading: enabled and being (re)loaded, or waiting on a dependency; no instance yet, no error
+    LOADING = "loading"
+    # disabled: provider config exists but is disabled by the user
+    DISABLED = "disabled"
+    # auth_required: setup failed because (re)authentication is needed
+    AUTH_REQUIRED = "auth_required"
+    # incompatible: the host does not meet the provider's requirements (permanent)
+    INCOMPATIBLE = "incompatible"
+    # error: setup failed for any other reason (see the provider's last_error)
+    ERROR = "error"
+
+
+class SortField(StrEnum):
+    """
+    Sort fields available for media listings.
+
+    RANDOM, RANDOM_PLAY_COUNT and ORIGINAL carry no direction.
+    """
+
+    NAME = "name"
+    SORT_NAME = "sort_name"
+    TIMESTAMP_ADDED = "timestamp_added"
+    TIMESTAMP_MODIFIED = "timestamp_modified"
+    LAST_PLAYED = "last_played"
+    PLAY_COUNT = "play_count"
+    DURATION = "duration"
+    YEAR = "year"
+    POSITION = "position"
+    ARTIST_NAME = "artist_name"
+    RANDOM = "random"
+    RANDOM_PLAY_COUNT = "random_play_count"
+    TRACK_NUMBER = "track_number"  # disc number, then track number
+    ALBUM_NAME = "album_name"  # the album a track belongs to
+    PROVIDER = "provider"  # the provider the item comes from
+    FAVORITE_TIMESTAMP = "favorite_timestamp"  # when the calling user liked the item
+    ORIGINAL = "original"  # the order the source lists the items in
+
+
+class SortDirection(StrEnum):
+    """Sort direction."""
+
+    ASC = "asc"
+    DESC = "desc"
+
+
+class ListingType(StrEnum):
+    """The listings a client can ask the sort options for (music/sort_options)."""
+
+    LIBRARY_ARTISTS = "library_artists"  # the artists in the library
+    LIBRARY_ALBUMS = "library_albums"  # the albums in the library
+    LIBRARY_TRACKS = "library_tracks"  # the tracks in the library
+    LIBRARY_PLAYLISTS = "library_playlists"  # the playlists in the library
+    LIBRARY_RADIOS = "library_radios"  # the radio stations in the library
+    LIBRARY_AUDIOBOOKS = "library_audiobooks"  # the audiobooks in the library
+    LIBRARY_PODCASTS = "library_podcasts"  # the podcasts in the library
+    LIBRARY_GENRES = "library_genres"  # the genres in the library
+    ALBUM_TRACKS = "album_tracks"  # the tracks of an album
+    ARTIST_ALBUMS = "artist_albums"  # the albums of an artist
+    ARTIST_TRACKS = "artist_tracks"  # the tracks of an artist
+    ARTIST_APPEARS_ON = "artist_appears_on"  # albums the artist is on, but not as album artist
+    ARTIST_DISCOGRAPHY = "artist_discography"  # every album, EP and single credited to the artist
+    ARTIST_TOP_TRACKS = "artist_top_tracks"  # the top tracks of an artist
+    ARTIST_TOP_ALBUMS = "artist_top_albums"  # the top albums of an artist
+    ARTIST_AUDIOBOOKS = "artist_audiobooks"  # the audiobooks of an author or narrator
+    SIMILAR_ARTISTS = "similar_artists"  # the artists similar to an artist
+    SIMILAR_TRACKS = "similar_tracks"  # the tracks similar to a track
+    TRACK_ALBUMS = "track_albums"  # the albums a track appears on
+    VERSIONS = "versions"  # versions of a track, album, podcast, audiobook or radio
+    PLAYLIST_TRACKS = "playlist_tracks"  # the tracks of a playlist
+    PODCAST_EPISODES = "podcast_episodes"  # the episodes of a podcast
+    GENRE_TRACKS = "genre_tracks"  # the tracks of a genre
+    GENRE_ALBUMS = "genre_albums"  # the albums of a genre
+    BROWSE = "browse"  # the items in a browse folder

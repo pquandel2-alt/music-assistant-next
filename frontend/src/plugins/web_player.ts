@@ -1,0 +1,427 @@
+import { loadSendspinClientIdentity } from "@sendspin/sendspin-js";
+import { reactive, ref, watch } from "vue";
+import {
+  BROWSER_MEDIA_CONTROLS,
+  BrowserMediaControlsMode,
+  getBrowserMediaControlsMode,
+  readDeviceSetting,
+  subscribeToDeviceSetting,
+} from "@/helpers/device_settings";
+import { resetMediaSession } from "@/helpers/mediaSession";
+import authManager from "./auth";
+import api from "./api";
+import { EventType } from "./api/interfaces";
+import { companionMode } from "./companion";
+import router from "./router";
+import { resetSendspinConnection } from "./sendspin-connection";
+
+export enum WebPlayerMode {
+  DISABLED = "disabled",
+  CONTROLS_ONLY = "controls_only",
+  SENDSPIN_ONLY = "sendspin_only",
+  SENDSPIN_WITH_CONTROLS = "sendspin_with_controls",
+}
+
+// Party guests are normally kept off the web player, but when a party has
+// listen-in enabled they need a receive-only player to stream the party audio.
+// The party guest view drives this flag from party/config.
+export const partyListenInEnabled = ref(false);
+
+// Helper to check if a mode is a playback mode (handles actual audio)
+export const isPlaybackMode = (mode: WebPlayerMode) =>
+  mode === WebPlayerMode.SENDSPIN_ONLY ||
+  mode === WebPlayerMode.SENDSPIN_WITH_CONTROLS;
+
+// The active SendspinPlayer registers a handler that unlocks this browser's
+// audio output from within a user gesture. Listen-in audio starts
+// asynchronously, so iOS would otherwise block it; priming during the gesture
+// keeps playback reliable. See SendspinPlayer.vue and useListenIn.
+let audioUnlockHandler: (() => boolean) | null = null;
+
+export function registerWebPlayerAudioUnlock(handler: () => boolean): void {
+  audioUnlockHandler = handler;
+}
+
+export function clearWebPlayerAudioUnlock(handler: () => boolean): void {
+  if (audioUnlockHandler === handler) audioUnlockHandler = null;
+}
+
+let unsubSubscriptions: (() => void)[] = [];
+
+// We use a channel to communicate with all other tabs of MA open.
+// This allows us to limit playback to only a single tab.
+// Playback can still be controlled from any tab, this just avoids double playback
+// of the music, and is independent from the player implementation used by the frontend.
+// In case the "leading" tab is closed, another open tab will take control.
+const bc = new BroadcastChannel("web-player");
+
+const BC_MSG = {
+  IS_ACTIVE: "IS_WEBPLAYER_ACTIVE",
+  IS_ACTIVE_RESPONSE: "WEBPLAYER_IS_ACTIVE",
+  TAKING_CONTROL: "TAKING_CONTROL:", // Followed by the priority
+  CONTROL_AVAILABLE: "CONTROL_AVAILABLE",
+  CONTROL_TAKEN: "CONTROL_TAKEN",
+};
+
+// Assume we timed out if after this time we did not send any updates
+// This is slightly smaller than on the server (90s) to avoid false positives with isAnotherTabActive
+const TIMEOUT_DURATION_MS = 75_000;
+
+// NOTE: using crypto.randomUUID() is not supported in insecure contexts (http)
+// so we're using getRandomValues instead
+const array = new Uint32Array(10);
+self.crypto.getRandomValues(array);
+const uniqueId = array.join("");
+
+bc.onmessage = (event) => {
+  if (webPlayer.mode === WebPlayerMode.DISABLED) {
+    return;
+  }
+
+  if (
+    typeof event.data === "string" &&
+    event.data.startsWith(BC_MSG.TAKING_CONTROL)
+  ) {
+    // Another tab is taking control, silently switch back to just the notification
+    // (maybe this tab was suspended by the browser and didn't respond in time?)
+    if (isPlaybackMode(webPlayer.tabMode)) {
+      // Silently fall back
+      webPlayer.setTabMode(WebPlayerMode.CONTROLS_ONLY, true);
+    }
+    const priority = event.data.substring(BC_MSG.TAKING_CONTROL.length);
+    if (highestPriority !== undefined)
+      highestPriority = highestPriority > priority ? highestPriority : priority;
+    else highestPriority = priority;
+  }
+  switch (event.data) {
+    case BC_MSG.IS_ACTIVE:
+      if (
+        isPlaybackMode(webPlayer.mode) &&
+        isPlaybackMode(webPlayer.tabMode) &&
+        webPlayer.player_id
+      ) {
+        // Check if we timed out
+        if (webPlayer.timedOutDueToThrottling()) {
+          webPlayer.setTabMode(WebPlayerMode.CONTROLS_ONLY, true);
+        } else {
+          // Respond if this tab is active
+          bc.postMessage(BC_MSG.IS_ACTIVE_RESPONSE);
+        }
+      }
+      break;
+    case BC_MSG.IS_ACTIVE_RESPONSE:
+      // Resolve any pending active player checks
+      activePlayerChecks.forEach((check) => {
+        clearTimeout(check.timeout);
+        check.resolve(true);
+      });
+      activePlayerChecks = [];
+      break;
+    case BC_MSG.CONTROL_AVAILABLE:
+      // Another tab released control, take over if desired
+      if (
+        isPlaybackMode(webPlayer.mode) &&
+        !isPlaybackMode(webPlayer.tabMode)
+      ) {
+        webPlayer.setTabMode(webPlayer.mode);
+      }
+      break;
+    case BC_MSG.CONTROL_TAKEN:
+      // Another tab took control, in case we still think we have control (if the tab was frozen by the browser),
+      // immediatly give it up
+      if (isPlaybackMode(webPlayer.tabMode)) {
+        webPlayer.setTabMode(WebPlayerMode.CONTROLS_ONLY, true);
+      }
+      break;
+  }
+};
+
+// Called on close — skip if page is entering bfcache (may be restored)
+window.addEventListener("pagehide", function (event) {
+  if (event.persisted) return;
+  bc.onmessage = null;
+  if (isPlaybackMode(webPlayer.tabMode) && webPlayer.player_id) {
+    bc.postMessage(BC_MSG.CONTROL_AVAILABLE);
+  }
+});
+
+// Track active player checks
+interface ActiveCheck {
+  resolve: (value: boolean) => void;
+  timeout: number;
+}
+let activePlayerChecks: ActiveCheck[] = [];
+
+async function isAnotherTabActive(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      activePlayerChecks = activePlayerChecks.filter(
+        (check) => check.timeout !== timeout,
+      );
+      resolve(false); // No response within 500ms, assume no active player
+    }, 500);
+
+    activePlayerChecks.push({ resolve, timeout });
+
+    // Send the message, onmessage will resolve to true in case another tab responds
+    bc.postMessage(BC_MSG.IS_ACTIVE);
+  });
+}
+
+// Per-device settings that feed resolvePreferredMode().
+const WEB_PLAYER_ENABLED = "web_player_enabled";
+
+let highestPriority: string | undefined;
+let modeSyncInitialized = false;
+let modeSyncInitializationPromise: Promise<void> | null = null;
+let pendingModeApplication = Promise.resolve();
+
+function resolvePreferredMode(
+  browserControlsMode: BrowserMediaControlsMode,
+): WebPlayerMode {
+  // This route explicitly disables the web player
+  const routeDisablesWebPlayer = router.currentRoute.value.matched.some(
+    (record) => record.meta.disableWebPlayer === true,
+  );
+
+  // Companion mode handles audio natively, so it always wins.
+  if (companionMode.value) {
+    return WebPlayerMode.DISABLED;
+  }
+
+  // Party guests get a receive-only player (no browser media controls) when the
+  // party has listen-in enabled; otherwise they stay off the web player.
+  if (authManager.isPartyGuest()) {
+    return partyListenInEnabled.value
+      ? WebPlayerMode.SENDSPIN_ONLY
+      : WebPlayerMode.DISABLED;
+  }
+
+  if (routeDisablesWebPlayer) {
+    return WebPlayerMode.DISABLED;
+  }
+
+  // Force sendspin mode for music quiz guests (listen-in audio support)
+  if (authManager.isMusicQuizGuest()) {
+    return WebPlayerMode.SENDSPIN_ONLY;
+  }
+
+  const webPlayerEnabled = readDeviceSetting(WEB_PLAYER_ENABLED) !== "false";
+  if (webPlayerEnabled) {
+    return browserControlsMode === BrowserMediaControlsMode.DISABLED
+      ? WebPlayerMode.SENDSPIN_ONLY
+      : WebPlayerMode.SENDSPIN_WITH_CONTROLS;
+  }
+  return browserControlsMode === BrowserMediaControlsMode.ACTIVE_PLAYER
+    ? WebPlayerMode.CONTROLS_ONLY
+    : WebPlayerMode.DISABLED;
+}
+
+// Serializes mode updates so concurrent triggers (init/route/watchers) apply in order.
+function queueModeApplication(): Promise<void> {
+  pendingModeApplication = pendingModeApplication.then(async () => {
+    const browserControlsMode = getBrowserMediaControlsMode();
+    webPlayer.browserControlsMode = browserControlsMode;
+    const mode = resolvePreferredMode(browserControlsMode);
+    if (mode !== webPlayer.mode || mode !== webPlayer.tabMode) {
+      await webPlayer.setMode(mode);
+    }
+  });
+  return pendingModeApplication;
+}
+
+// Automatically sets web player mode from route policy, guest/companion state, and user preferences.
+// Must be called once on page load to set up mode synchronization hooks.
+// Safe to call multiple times.
+export async function initializeWebPlayerModeSync(): Promise<void> {
+  if (modeSyncInitializationPromise) {
+    await modeSyncInitializationPromise;
+    return queueModeApplication();
+  }
+
+  if (modeSyncInitialized) {
+    return queueModeApplication();
+  }
+
+  modeSyncInitializationPromise = (async () => {
+    await router.isReady();
+    await queueModeApplication();
+
+    router.afterEach(() => {
+      void queueModeApplication();
+    });
+
+    watch(companionMode, () => {
+      void queueModeApplication();
+    });
+
+    watch(partyListenInEnabled, () => {
+      void queueModeApplication();
+    });
+
+    // The settings page writes these straight to localStorage. Follow them here
+    // so switching the web player off tears it down right away, in every tab of
+    // this browser, instead of at the next navigation.
+    for (const setting of [WEB_PLAYER_ENABLED, BROWSER_MEDIA_CONTROLS]) {
+      subscribeToDeviceSetting(setting, () => {
+        void queueModeApplication();
+      });
+    }
+
+    modeSyncInitialized = true;
+    modeSyncInitializationPromise = null;
+  })();
+
+  return modeSyncInitializationPromise;
+}
+
+async function canTakeControl(): Promise<boolean> {
+  // Generate a unique priority string with interaction as a prefix
+  // (so interacted and visible with tabs are prioritized)
+  const priority =
+    (webPlayer.interacted ? "1" : "0") +
+    (document.hidden ? "0" : "1") +
+    uniqueId;
+
+  if (highestPriority !== undefined)
+    highestPriority = highestPriority > priority ? highestPriority : priority;
+  else highestPriority = priority;
+  bc.postMessage(BC_MSG.TAKING_CONTROL + priority);
+
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      // Compare lexicographically - only one tab can win
+      const wonControl = highestPriority === priority;
+      highestPriority = undefined;
+      resolve(wonControl);
+    }, 2000);
+  });
+}
+
+export const webPlayer = reactive({
+  browserControlsMode: BrowserMediaControlsMode.WEB_PLAYER,
+  // This is target mode shared across all tabs
+  mode: WebPlayerMode.DISABLED,
+  // This is the true mode of this tab.
+  // In case of a playback mode (SENDSPIN), exactly one tab will have this equal to mode to avoid double playback
+  tabMode: WebPlayerMode.DISABLED,
+  // This dictates what component will play audio to have the notification show up on all browsers
+  audioSource: WebPlayerMode.DISABLED,
+  // URL of the webserver
+  baseUrl: "",
+  // id of the player that is provided by this frontend
+  player_id: null as string | null,
+  // Monotonic identity for player recreation, including same-ID sessions.
+  player_generation: 0,
+  // If the user interacted with the frontend, required to avoid autoplay restrictions
+  interacted: false,
+  // Timestamp from when the last update was sent
+  lastUpdate: 0,
+  async setMode(mode: WebPlayerMode) {
+    this.mode = mode;
+    await this.setTabMode(mode);
+  },
+  async setTabMode(mode: WebPlayerMode, silent: boolean = false) {
+    for (const u of unsubSubscriptions) {
+      u();
+    }
+    unsubSubscriptions = [];
+
+    if (isPlaybackMode(this.tabMode)) {
+      if (this.player_id) {
+        // Notify other tabs, if another tab already has control, this will change nothing
+        bc.postMessage(BC_MSG.CONTROL_AVAILABLE);
+      }
+    }
+    this.audioSource = WebPlayerMode.DISABLED;
+    this.player_generation++;
+    this.player_id = null;
+
+    // If trying to set to a playback mode, check if another tab already has it
+    if (isPlaybackMode(mode)) {
+      if (await isAnotherTabActive()) {
+        // Another tab already is already responsible for the playback, fall back to CONTROLS_ONLY
+        mode = WebPlayerMode.CONTROLS_ONLY;
+      } else {
+        // No other tab has control, but another tab tries to take control simultaneously?
+        if (!(await canTakeControl())) {
+          // No, another tab will take it from here
+          mode = WebPlayerMode.CONTROLS_ONLY;
+        }
+      }
+    }
+
+    if (isPlaybackMode(mode)) {
+      // Sendspin owns browser media controls in the playback tab.
+      this.audioSource = WebPlayerMode.DISABLED;
+      // The sendspin client id is its Noise public key, so the SDK owns it. Mirror
+      // it into localStorage for the tabs and the proxy handshake that read it.
+      const player_id = loadSendspinClientIdentity().clientId;
+      window.localStorage.setItem("sendspin_webplayer_id", player_id);
+      this.player_id = player_id;
+      this.lastUpdate = Date.now();
+
+      bc.postMessage(BC_MSG.CONTROL_TAKEN);
+    } else if (mode == WebPlayerMode.CONTROLS_ONLY) {
+      // This is guaranteed to not be a first tab (since that would have a playback tabMode)
+      // Therefore, this player_id should be already set - read based on target mode
+      const saved_player_id = window.localStorage.getItem(
+        "sendspin_webplayer_id",
+      );
+      this.player_id = saved_player_id;
+      this.audioSource = WebPlayerMode.CONTROLS_ONLY;
+    } else {
+      this.audioSource = WebPlayerMode.DISABLED;
+    }
+
+    this.tabMode = mode;
+    if (authManager.isGuestAccessSession()) resetMediaSession();
+
+    if (this.player_id) {
+      // The sendspin session follows the main API connection: tear the web player
+      // down when the server connection is lost, and let App.vue re-apply the mode
+      // (which remounts the player) once it is restored. A sendspin transport drop
+      // that leaves the main connection intact is recovered by sendspin-js's own
+      // reconnect, so it does not need to be handled here.
+      unsubSubscriptions.push(
+        api.subscribe(EventType.DISCONNECTED, () => {
+          resetSendspinConnection();
+          this.setTabMode(WebPlayerMode.CONTROLS_ONLY, true);
+        }),
+      );
+      unsubSubscriptions.push(
+        api.subscribe(
+          EventType.PLAYER_REMOVED,
+          () => {
+            // Player removed server-side: silently fall back to controls only.
+            this.setTabMode(WebPlayerMode.CONTROLS_ONLY, true);
+          },
+          this.player_id,
+        ),
+      );
+    }
+  },
+  setBaseUrl(url: string) {
+    if (url.endsWith("/")) url = url.slice(0, -1);
+    if (url === this.baseUrl) {
+      return;
+    }
+    const prevMode = this.tabMode;
+    // First disable to avoid conflicts
+    this.setTabMode(WebPlayerMode.DISABLED);
+    this.baseUrl = url;
+    this.setTabMode(prevMode);
+  },
+  async setInteracted() {
+    if (this.interacted) return;
+    this.interacted = true;
+  },
+  // Unlock this browser's audio output from within a user gesture so
+  // asynchronously-started listen-in audio can play (notably on iOS).
+  primeAudio() {
+    return audioUnlockHandler?.() ?? false;
+  },
+  timedOutDueToThrottling() {
+    return Date.now() - webPlayer.lastUpdate >= TIMEOUT_DURATION_MS;
+  },
+});

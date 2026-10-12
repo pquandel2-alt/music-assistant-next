@@ -1,0 +1,1021 @@
+<template>
+  <div>
+    <Toolbar :icon="Settings">
+      <template #title>
+        <ToolbarHeading
+          :title="t('settings.settings')"
+          :to="isOverview ? undefined : { name: 'settings' }"
+          :items="breadcrumbItems"
+        />
+      </template>
+      <template #append>
+        <v-btn
+          v-if="isOverview"
+          :icon="settingsViewMode === 'list' ? 'mdi-view-list' : 'mdi-grid'"
+          variant="text"
+          :title="getToggleViewModeLabel(settingsViewMode)"
+          :aria-label="getToggleViewModeLabel(settingsViewMode)"
+          @click="toggleSettingsViewMode()"
+        />
+        <v-btn
+          v-if="isPlayersPage"
+          :icon="playersViewMode === 'list' ? 'mdi-view-list' : 'mdi-grid'"
+          variant="text"
+          :title="getToggleViewModeLabel(playersViewMode)"
+          :aria-label="getToggleViewModeLabel(playersViewMode)"
+          @click="togglePlayersViewMode()"
+        />
+        <v-btn
+          v-if="isProvidersPage"
+          :icon="providersViewMode === 'list' ? 'mdi-view-list' : 'mdi-grid'"
+          variant="text"
+          :title="getToggleViewModeLabel(providersViewMode)"
+          :aria-label="getToggleViewModeLabel(providersViewMode)"
+          @click="toggleProvidersViewMode()"
+        />
+        <v-btn
+          v-if="isTasksPage"
+          :icon="tasksViewMode === 'list' ? 'mdi-view-list' : 'mdi-grid'"
+          variant="text"
+          :title="getToggleViewModeLabel(tasksViewMode)"
+          :aria-label="getToggleViewModeLabel(tasksViewMode)"
+          @click="toggleTasksViewMode()"
+        />
+        <v-btn
+          v-if="isSystemPage"
+          :icon="systemViewMode === 'list' ? 'mdi-view-list' : 'mdi-grid'"
+          variant="text"
+          :title="getToggleViewModeLabel(systemViewMode)"
+          :aria-label="getToggleViewModeLabel(systemViewMode)"
+          @click="toggleSystemViewMode()"
+        />
+      </template>
+    </Toolbar>
+
+    <v-divider />
+
+    <Container
+      v-if="isOverview"
+      variant="comfortable"
+      class="settings-overview"
+    >
+      <div v-if="settingsViewMode === 'card'" class="settings-card-view">
+        <div class="settings-featured">
+          <Card
+            v-for="section in [...musicSections, ...playerSections]"
+            :key="section.name"
+            class="setting-card"
+            @click="router.push(section.route)"
+          >
+            <CardHeader>
+              <div class="setting-header-top">
+                <div
+                  class="setting-icon"
+                  :style="getIconBackgroundStyle(section.color)"
+                >
+                  <Icon :icon="section.icon" size="20" color="white" />
+                </div>
+                <div class="setting-chevron">
+                  <Icon icon="mdi-chevron-right" size="20" />
+                </div>
+              </div>
+              <CardTitle class="setting-title">
+                {{ t(section.label) }}
+              </CardTitle>
+              <CardDescription class="setting-description">
+                {{ t(section.description) }}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
+
+        <div class="settings-grid">
+          <Card
+            v-for="section in regularSections"
+            :key="section.name"
+            class="setting-card"
+            @click="router.push(section.route)"
+          >
+            <CardHeader>
+              <div class="setting-header-top">
+                <div
+                  class="setting-icon"
+                  :style="getIconBackgroundStyle(section.color)"
+                >
+                  <Icon :icon="section.icon" size="20" color="white" />
+                </div>
+                <div class="setting-chevron">
+                  <Icon icon="mdi-chevron-right" size="20" />
+                </div>
+              </div>
+              <CardTitle class="setting-title">
+                {{ t(section.label) }}
+              </CardTitle>
+              <CardDescription class="setting-description">
+                {{ t(section.description) }}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        </div>
+      </div>
+
+      <div v-else class="settings-list-view">
+        <v-list class="settings-list">
+          <ListItem
+            v-for="section in providersSection"
+            :key="section.name"
+            link
+            class="settings-list-item"
+            @click="router.push(section.route)"
+          >
+            <template #prepend>
+              <div
+                class="setting-list-icon"
+                :style="getIconBackgroundStyle(section.color)"
+              >
+                <Icon :icon="section.icon" size="20" color="white" />
+              </div>
+            </template>
+            <template #title>
+              {{ t(section.label) }}
+            </template>
+            <template #subtitle>
+              {{ t(section.description) }}
+            </template>
+            <template #append>
+              <Icon icon="mdi-chevron-right" size="20" />
+            </template>
+          </ListItem>
+
+          <ListItem
+            v-for="section in playersSection"
+            :key="section.name"
+            link
+            class="settings-list-item"
+            @click="router.push(section.route)"
+          >
+            <template #prepend>
+              <div
+                class="setting-list-icon"
+                :style="getIconBackgroundStyle(section.color)"
+              >
+                <Icon :icon="section.icon" size="20" color="white" />
+              </div>
+            </template>
+            <template #title>
+              {{ t(section.label) }}
+            </template>
+            <template #subtitle>
+              {{ t(section.description) }}
+            </template>
+            <template #append>
+              <Icon icon="mdi-chevron-right" size="20" />
+            </template>
+          </ListItem>
+
+          <ListItem
+            v-for="section in otherSettingsSections"
+            :key="section.name"
+            link
+            class="settings-list-item"
+            @click="router.push(section.route)"
+          >
+            <template #prepend>
+              <div
+                class="setting-list-icon"
+                :style="getIconBackgroundStyle(section.color)"
+              >
+                <Icon :icon="section.icon" size="20" color="white" />
+              </div>
+            </template>
+            <template #title>
+              {{ t(section.label) }}
+            </template>
+            <template #subtitle>
+              {{ t(section.description) }}
+            </template>
+            <template #append>
+              <Icon icon="mdi-chevron-right" size="20" />
+            </template>
+          </ListItem>
+        </v-list>
+      </div>
+
+      <div v-if="canOpenOnboarding" class="mt-2 flex justify-center">
+        <Button
+          variant="link"
+          class="text-muted-foreground"
+          data-testid="run-onboarding"
+          @click="launchOnboarding"
+        >
+          {{ t(onboardingLinkKey) }}
+        </Button>
+      </div>
+    </Container>
+
+    <router-view v-else v-slot="{ Component }">
+      <component :is="Component" v-if="Component" />
+    </router-view>
+  </div>
+</template>
+
+<script setup lang="ts">
+import Container from "@/components/Container.vue";
+import Icon from "@/components/Icon.vue";
+import ListItem from "@/components/ListItem.vue";
+import Toolbar from "@/components/Toolbar.vue";
+import ToolbarHeading, {
+  type ToolbarHeadingItem,
+} from "@/components/ToolbarHeading.vue";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { provideEditedProviderName } from "@/composables/useEditedProviderName";
+import { useOnboarding } from "@/composables/useOnboarding";
+import { useUserPreferences } from "@/composables/userPreferences";
+import { hasOnboardingTrack, isAdminTrack } from "@/helpers/onboarding_access";
+import { embeddedProviderDomain } from "@/helpers/provider_domain";
+import { availableSettingsSections } from "@/helpers/settings_sections";
+import { api } from "@/plugins/api";
+import { ProviderType, Scope } from "@/plugins/api/interfaces";
+import { authManager } from "@/plugins/auth";
+import { Settings } from "@lucide/vue";
+import { match } from "ts-pattern";
+import { useEscapeBack } from "@/composables/useEscapeBack";
+import { goBack } from "@/helpers/navigation";
+import { computed, provide, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import { useRouter } from "vue-router";
+import { useDisplay } from "vuetify";
+
+// global refs
+const router = useRouter();
+const { t } = useI18n();
+const { getPreference, setPreference } = useUserPreferences();
+const { mobile } = useDisplay();
+
+// the provider settings page publishes the name it shows, so the crumb above
+// it cannot disagree with its heading
+const editedProviderName = provideEditedProviderName();
+
+const settingsViewMode = ref<"list" | "card">("card");
+const settingsListPrependGap = computed(() => (mobile.value ? 4 : 24));
+const savedSettingsViewMode = getPreference<"list" | "card">(
+  "settings.overview.viewMode",
+  "card",
+);
+
+type SettingsViewMode = "list" | "card";
+
+const getSettingsViewModeLabel = function (mode: SettingsViewMode) {
+  return mode === "list" ? t("view.list") : t("view.card");
+};
+
+const getNextSettingsViewMode = function (
+  mode: SettingsViewMode,
+): SettingsViewMode {
+  return mode === "list" ? "card" : "list";
+};
+
+const getToggleViewModeLabel = function (mode: SettingsViewMode) {
+  const nextMode = getNextSettingsViewMode(mode);
+  return t("tooltip.view_mode_switch", [
+    getSettingsViewModeLabel(mode),
+    getSettingsViewModeLabel(nextMode),
+  ]);
+};
+
+watch(
+  () => savedSettingsViewMode.value,
+  (savedViewMode) => {
+    if (savedViewMode === "list" || savedViewMode === "card") {
+      settingsViewMode.value = savedViewMode;
+    }
+  },
+  { immediate: true },
+);
+
+const toggleSettingsViewMode = function () {
+  settingsViewMode.value = settingsViewMode.value === "list" ? "card" : "list";
+  setPreference("settings.overview.viewMode", settingsViewMode.value);
+};
+
+const playersViewMode = ref<"list" | "card">("list");
+const isPlayersPage = computed(() => {
+  const name = router.currentRoute.value.name?.toString() || "";
+  return name.includes("players") || name === "addgroup";
+});
+
+const savedPlayersViewMode = getPreference<"list" | "card">(
+  "settings.players.viewMode",
+  "list",
+);
+
+watch(
+  () => savedPlayersViewMode.value,
+  (savedViewMode) => {
+    if (savedViewMode === "list" || savedViewMode === "card") {
+      playersViewMode.value = savedViewMode;
+    }
+  },
+  { immediate: true },
+);
+
+const togglePlayersViewMode = function () {
+  playersViewMode.value = playersViewMode.value === "list" ? "card" : "list";
+  setPreference("settings.players.viewMode", playersViewMode.value);
+};
+
+provide("playersViewMode", {
+  viewMode: playersViewMode,
+  toggleViewMode: togglePlayersViewMode,
+});
+
+const providersViewMode = ref<"list" | "card">("card");
+const isProvidersPage = computed(() => {
+  const name = router.currentRoute.value.name?.toString() || "";
+  return name.includes("providers");
+});
+
+const savedProvidersViewMode = getPreference<"list" | "card">(
+  "settings.providers.viewMode",
+  "card",
+);
+
+watch(
+  () => savedProvidersViewMode.value,
+  (savedViewMode) => {
+    if (savedViewMode === "list" || savedViewMode === "card") {
+      providersViewMode.value = savedViewMode;
+    }
+  },
+  { immediate: true },
+);
+
+const toggleProvidersViewMode = function () {
+  providersViewMode.value =
+    providersViewMode.value === "list" ? "card" : "list";
+  setPreference("settings.providers.viewMode", providersViewMode.value);
+};
+
+provide("providersViewMode", {
+  viewMode: providersViewMode,
+  toggleViewMode: toggleProvidersViewMode,
+});
+
+const tasksViewMode = ref<"list" | "card">("list");
+const isTasksPage = computed(
+  () => router.currentRoute.value.name?.toString() === "backgroundtasks",
+);
+
+const savedTasksViewMode = getPreference<"list" | "card">(
+  "settings.tasks.viewMode",
+  "list",
+);
+
+watch(
+  () => savedTasksViewMode.value,
+  (savedViewMode) => {
+    if (savedViewMode === "list" || savedViewMode === "card") {
+      tasksViewMode.value = savedViewMode;
+    }
+  },
+  { immediate: true },
+);
+
+const toggleTasksViewMode = function () {
+  tasksViewMode.value = tasksViewMode.value === "list" ? "card" : "list";
+  setPreference("settings.tasks.viewMode", tasksViewMode.value);
+};
+
+provide("tasksViewMode", {
+  viewMode: tasksViewMode,
+  toggleViewMode: toggleTasksViewMode,
+});
+
+const isSystemPage = computed(
+  () => router.currentRoute.value.name?.toString() === "systemsettings",
+);
+
+const systemViewMode = ref<"list" | "card">("list");
+const savedSystemViewMode = getPreference<"list" | "card">(
+  "settings.system.viewMode",
+  "list",
+);
+
+watch(
+  () => savedSystemViewMode.value,
+  (savedViewMode) => {
+    if (savedViewMode === "list" || savedViewMode === "card") {
+      systemViewMode.value = savedViewMode;
+    }
+  },
+  { immediate: true },
+);
+
+const toggleSystemViewMode = function () {
+  systemViewMode.value = systemViewMode.value === "list" ? "card" : "list";
+  setPreference("settings.system.viewMode", systemViewMode.value);
+};
+
+provide("systemViewMode", {
+  viewMode: systemViewMode,
+  toggleViewMode: toggleSystemViewMode,
+});
+
+// Onboarding is reachable again from here: the setup wizard for the admin who
+// sets every kind of provider up, and the welcome for everyone else who lives
+// here — there is no setup for them to run again.
+const canOpenOnboarding = computed(() => hasOnboardingTrack());
+const onboardingLinkKey = computed(() =>
+  isAdminTrack() ? "onboarding.run_again" : "onboarding.welcome_again",
+);
+const { open: openOnboarding } = useOnboarding();
+// The setup wizard opens on whatever is left to set up. The welcome has been
+// shown by the time this link is any use, so nothing is left to do on it and
+// it would otherwise open on its own summary: showing it again means showing
+// it from the top.
+const launchOnboarding = () =>
+  openOnboarding(isAdminTrack() ? undefined : "welcome");
+
+const settingsSections = computed(() =>
+  availableSettingsSections((scope) => authManager.hasScope(scope)),
+);
+
+const providerSectionNames = [
+  "music_providers",
+  "player_providers",
+  "metadata_providers",
+  "plugin_providers",
+  "audio_analysis_providers",
+];
+
+const musicSections = computed(() => {
+  return settingsSections.value.filter(
+    (section) => section.name === "music_providers",
+  );
+});
+
+const playerSections = computed(() => {
+  return settingsSections.value.filter((section) => section.name === "players");
+});
+
+const regularSections = computed(() => {
+  return settingsSections.value.filter(
+    (section) =>
+      section.name !== "music_providers" && section.name !== "players",
+  );
+});
+
+const providersSection = computed(() => {
+  return settingsSections.value.filter((section) =>
+    providerSectionNames.includes(section.name),
+  );
+});
+
+const playersSection = computed(() => {
+  return settingsSections.value.filter((section) => section.name === "players");
+});
+
+const otherSettingsSections = computed(() => {
+  return settingsSections.value.filter(
+    (section) =>
+      !providerSectionNames.includes(section.name) &&
+      section.name !== "players",
+  );
+});
+
+const getIconBackgroundStyle = (color: string) => {
+  const colorMap: Record<string, string> = {
+    indigo: "rgb(99, 102, 241)",
+    blue: "rgb(59, 130, 246)",
+    green: "rgb(34, 197, 94)",
+    purple: "rgb(168, 85, 247)",
+    "deep-purple": "rgb(124, 58, 237)",
+    orange: "rgb(249, 115, 22)",
+    teal: "rgb(20, 184, 166)",
+    "grey-darken-1": "rgb(158, 158, 158)",
+  };
+  return { backgroundColor: colorMap[color] || colorMap.indigo };
+};
+
+// computed properties
+const isOverview = computed(() => {
+  return router.currentRoute.value.name === "settings";
+});
+
+useEscapeBack(
+  () => goBack(router, { name: "settings" }),
+  () => !isOverview.value,
+);
+
+const activeTab = computed(() => {
+  const name = router.currentRoute.value.name?.toString() || "";
+  if (name === "profile") {
+    return "profile";
+  }
+  if (
+    name.includes("player") ||
+    name.includes("queue") ||
+    name === "addgroup"
+  ) {
+    return "players";
+  }
+  if (
+    name.includes("system") ||
+    name.includes("core") ||
+    name.includes("serverlog") ||
+    name === "backgroundtasks" ||
+    name === "diagnostics" ||
+    name === "genremanagement" ||
+    name === "audioanalysissettings" ||
+    name === "storagesettings"
+  ) {
+    return "system";
+  }
+  if (name.includes("frontend")) {
+    return "frontend";
+  }
+  if (name.includes("remoteaccess")) {
+    return "remote_access";
+  }
+  if (name.includes("user")) {
+    return "users";
+  }
+  if (name.includes("about")) {
+    return "about";
+  }
+
+  const typesQuery = router.currentRoute.value.query.types as
+    string | undefined;
+  const firstType = typesQuery ? typesQuery.split(",")[0].trim() : undefined;
+  if (firstType === "music") return "music_providers";
+  if (firstType === "player") return "player_providers";
+  if (firstType === "metadata") return "metadata_providers";
+  if (firstType === "plugin") return "plugin_providers";
+  if (firstType === "audio_analysis") return "audio_analysis_providers";
+
+  if (name === "editprovider") {
+    const instanceId = router.currentRoute.value.params.instanceId as string;
+    // disabled instances are not loaded, so fall back to the manifest type
+    const providerType =
+      api.getProvider(instanceId)?.type ||
+      api.providerManifests[embeddedProviderDomain(instanceId)]?.type;
+    if (providerType === ProviderType.MUSIC) return "music_providers";
+    if (providerType === ProviderType.PLAYER) return "player_providers";
+    if (providerType === ProviderType.METADATA) return "metadata_providers";
+    if (providerType === ProviderType.PLUGIN) return "plugin_providers";
+    if (providerType === ProviderType.AUDIO_ANALYSIS)
+      return "audio_analysis_providers";
+  }
+
+  return "music_providers";
+});
+
+const breadcrumbItems = computed(() => {
+  const route = router.currentRoute.value;
+  const name = route.name?.toString() || "";
+  // without config.players.write only the player options open, so the crumbs
+  // leading to the players and their settings are plain text
+  const canConfigurePlayers = authManager.hasScope(Scope.CONFIG_PLAYERS_WRITE);
+
+  // "Settings" heads the toolbar on its own line, so the trail starts below it
+  const items: ToolbarHeadingItem[] = [];
+
+  if (!isOverview.value) {
+    const currentTab = activeTab.value;
+    if (currentTab === "profile") {
+      items.push({
+        title: t("auth.profile"),
+        disabled: name === "profile",
+        to: { name: "profile" },
+      });
+    } else if (currentTab === "players") {
+      items.push({
+        title: t("settings.players"),
+        disabled: name === "playersettings",
+        to: canConfigurePlayers ? { name: "playersettings" } : undefined,
+      });
+    } else if (currentTab === "system") {
+      if (!(
+        name === "backgroundtasks" &&
+        !authManager.hasScope(Scope.CONFIG_CORE_WRITE)
+      )) {
+        items.push({
+          title: t("settings.system"),
+          disabled: name === "systemsettings",
+          to: { name: "systemsettings" },
+        });
+      }
+    } else if (currentTab === "remote_access") {
+      items.push({
+        title: t("settings.remote_access"),
+        disabled: name === "remoteaccesssettings",
+        to: { name: "remoteaccesssettings" },
+      });
+    } else if (currentTab === "frontend") {
+      items.push({
+        title: t("settings.frontend"),
+        disabled: name === "frontendsettings",
+        to: { name: "frontendsettings" },
+      });
+    } else if (currentTab === "users") {
+      items.push({
+        title: t("settings.users"),
+        disabled: name === "usersettings",
+        to: { name: "usersettings" },
+      });
+    } else if (currentTab === "music_providers") {
+      items.push({
+        title: t("settings.music_sources"),
+        disabled: name === "providersettings",
+        to: { name: "providersettings", query: { types: "music" } },
+      });
+    } else if (currentTab === "player_providers") {
+      items.push({
+        title: t("settings.playerproviders"),
+        disabled: name === "providersettings",
+        to: { name: "providersettings", query: { types: "player" } },
+      });
+    } else if (currentTab === "metadata_providers") {
+      items.push({
+        title: t("settings.metadataproviders"),
+        disabled: name === "providersettings",
+        to: { name: "providersettings", query: { types: "metadata" } },
+      });
+    } else if (currentTab === "plugin_providers") {
+      items.push({
+        title: t("settings.plugins"),
+        disabled: name === "providersettings",
+        to: { name: "providersettings", query: { types: "plugin" } },
+      });
+    } else if (currentTab === "audio_analysis_providers") {
+      items.push({
+        title: t("settings.audio_analysis_providers"),
+        disabled: name === "providersettings",
+        to: { name: "providersettings", query: { types: "audio_analysis" } },
+      });
+    } else if (currentTab === "about") {
+      items.push({
+        title: t("settings.about"),
+        disabled: name === "aboutsettings",
+        to: { name: "aboutsettings" },
+      });
+    }
+  }
+
+  match(name)
+    .with("editprovider", () => {
+      items.push({
+        title:
+          editedProviderName.value ||
+          api.getProviderName(route.params.instanceId as string),
+        disabled: true,
+      });
+    })
+    .with("addgroup", () => {
+      items.push({ title: t("settings.add_group_player"), disabled: true });
+    })
+    .with(
+      "editplayer",
+      "editplayerdsp",
+      "editplayeroptions",
+      "editqueue",
+      () => {
+        // a queue is identified by the player id of the player owning it
+        const playerId = (route.params.playerId ||
+          route.params.queueId) as string;
+        items.push({
+          // a disabled player is never registered, so it has no name to show
+          title: api.players[playerId]?.name || t("settings.player_settings"),
+          disabled: name === "editplayer",
+          to: canConfigurePlayers
+            ? { name: "editplayer", params: { playerId } }
+            : undefined,
+        });
+        const section = match(name)
+          .with("editplayerdsp", () => t("settings.category.dsp"))
+          .with("editplayeroptions", () => t("settings.category.options"))
+          .with("editqueue", () => t("settings.queue_settings"))
+          .otherwise(() => undefined);
+        if (section) items.push({ title: section, disabled: true });
+      },
+    )
+    .with("editcore", () => {
+      const domain = route.params.domain as string;
+      const translated = t(`settings.core_module.${domain}.name`);
+      const moduleName =
+        translated !== `settings.core_module.${domain}.name`
+          ? translated
+          : api.providerManifests[domain]?.name || domain;
+      items.push({
+        title: moduleName,
+        disabled: true,
+      });
+    })
+    .with("diagnostics", () => {
+      items.push({
+        title: t("settings.diagnostics"),
+        disabled: true,
+      });
+    })
+    .with("backgroundtasks", () => {
+      items.push({
+        title: t("background_tasks.title"),
+        disabled: true,
+      });
+    })
+    .with("genremanagement", () => {
+      items.push({
+        title: t("settings.genre_management"),
+        disabled: true,
+      });
+    })
+    .with("storagesettings", () => {
+      items.push({
+        title: t("settings.storage.title"),
+        disabled: true,
+      });
+    })
+    .with("audioanalysissettings", () => {
+      items.push({
+        title: t("settings.audio_analysis"),
+        disabled: true,
+      });
+    })
+    .otherwise(() => {
+      return;
+    });
+
+  return items;
+});
+</script>
+
+<style scoped>
+.settings-overview {
+  max-width: 1200px !important;
+  margin: 0 auto;
+}
+
+.settings-card-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-featured {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 768px) {
+  .settings-featured {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+@media (min-width: 960px) {
+  .settings-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1280px) {
+  .settings-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.setting-card {
+  cursor: pointer;
+  position: relative;
+  transition:
+    transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  padding: 6px 0 0 0;
+}
+
+.setting-card:hover {
+  transform: translateY(-4px);
+  box-shadow:
+    0 12px 24px rgba(0, 0, 0, 0.15),
+    0 4px 8px rgba(0, 0, 0, 0.1);
+  border-color: rgba(var(--v-theme-primary), 0.3);
+}
+
+.setting-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.setting-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  flex-shrink: 0;
+}
+
+.setting-card:hover .setting-icon {
+  transform: scale(1.1) rotate(5deg);
+}
+
+.setting-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.setting-description {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  margin: 0;
+}
+
+.setting-chevron {
+  opacity: 0.4;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease,
+    background 0.2s ease,
+    color 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(var(--v-theme-on-surface), 0.05);
+  flex-shrink: 0;
+}
+
+.setting-card:hover .setting-chevron {
+  opacity: 1;
+  transform: translateX(4px);
+  background: rgba(var(--v-theme-primary), 0.1);
+  color: rgb(var(--v-theme-primary));
+}
+
+.settings-list-view {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.settings-list {
+  padding: 0;
+  background: transparent;
+}
+
+.settings-list-item {
+  cursor: pointer;
+  padding: 20px 24px;
+  min-height: 80px;
+  border-bottom: none;
+  background: transparent;
+}
+
+.settings-list-item:hover {
+  background-color: rgba(var(--v-theme-on-surface), 0.05);
+}
+
+.list-item-main {
+  border-radius: 10px !important;
+}
+
+.setting-list-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  flex-shrink: 0;
+}
+
+.settings-list-item :deep(.v-list-item__prepend) {
+  padding-inline-end: 6px;
+}
+
+.settings-list-item :deep(.v-list-item__prepend .v-icon) {
+  margin-inline-end: 0 !important;
+}
+
+.settings-list-item :deep(.v-list-item__content > div) {
+  padding-left: 0;
+}
+
+.settings-list-item :deep(.v-list-item-title) {
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.settings-list-item :deep(.v-list-item-subtitle) {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  margin-top: 4px;
+}
+
+.settings-list-item :deep(.v-list-item__append) {
+  opacity: 0.4;
+  transition: opacity 0.2s ease;
+}
+
+.settings-list-item:hover :deep(.v-list-item__append) {
+  opacity: 1;
+}
+
+@media (max-width: 768px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .settings-overview {
+    padding: 16px 12px;
+  }
+
+  .setting-header-top {
+    margin-bottom: 8px;
+  }
+
+  .setting-icon {
+    width: 40px;
+    height: 40px;
+  }
+
+  .setting-chevron {
+    width: 26px;
+    height: 26px;
+  }
+
+  .setting-title {
+    font-size: 0.938rem;
+  }
+
+  .settings-list-item {
+    padding: 16px;
+    min-height: 72px;
+  }
+
+  .settings-list-item :deep(.v-list-item-title) {
+    font-size: 1rem;
+  }
+
+  .settings-list-item :deep(.v-list-item-subtitle) {
+    font-size: 0.813rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .settings-overview {
+    padding: 16px 12px;
+  }
+
+  .setting-icon-featured {
+    width: 56px;
+    height: 56px;
+  }
+
+  .setting-card-featured .setting-title {
+    font-size: 1.25rem;
+  }
+
+  .settings-list-item {
+    padding: 16px;
+    min-height: 72px;
+  }
+
+  .settings-list-item :deep(.v-list-item-title) {
+    font-size: 1rem;
+  }
+
+  .settings-list-item :deep(.v-list-item-subtitle) {
+    font-size: 0.813rem;
+  }
+}
+</style>

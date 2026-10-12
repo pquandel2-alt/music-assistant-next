@@ -1,0 +1,518 @@
+<template>
+  <section>
+    <InfoHeader :item="itemDetails" :active-provider="provider">
+      <template #toolbar-append>
+        <Button
+          variant="ghost"
+          size="icon"
+          :title="viewModeMenuLabel"
+          @click="(e: MouseEvent) => openViewModeMenu(e)"
+        >
+          <v-icon :icon="viewModeIcon" />
+        </Button>
+      </template>
+    </InfoHeader>
+
+    <!-- Discovery view -->
+    <template v-if="viewMode === 'discovery'">
+      <div v-if="loadingRows" class="rows-loading">
+        <v-progress-linear color="accent" height="4" indeterminate rounded />
+      </div>
+
+      <div class="overview-container">
+        <EditorialShelf
+          v-for="row in displayRows"
+          :key="row.title"
+          :title="row.title"
+          :tiles-per-view="tilesPerView"
+          class="overview-row"
+        >
+          <template v-if="row.action" #title-append>
+            <SquareArrowRightEnter
+              :size="18"
+              class="overview-row__nav"
+              @click="row.action"
+            />
+          </template>
+          <EditorialMediaCard
+            v-for="item in row.items"
+            :key="item.uri"
+            :item="item"
+            :show-provider-on-cover="true"
+            :is-available="itemIsAvailable(item)"
+          />
+        </EditorialShelf>
+      </div>
+    </template>
+
+    <!-- Traditional view -->
+    <template v-else-if="itemDetails && !loading">
+      <ItemsListing
+        itemtype="artists"
+        :load-items="loadGenreArtists"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("artists") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('artists') })"
+            @click.stop="navigateTo('artists')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+      <ItemsListing
+        itemtype="albums"
+        :load-items="loadGenreAlbums"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("albums") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('albums') })"
+            @click.stop="navigateTo('albums')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+      <ItemsListing
+        itemtype="tracks"
+        :load-items="loadGenreTracks"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :show-track-number="false"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("tracks") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('tracks') })"
+            @click.stop="navigateTo('tracks')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+      <ItemsListing
+        itemtype="playlists"
+        :load-items="loadGenrePlaylists"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("playlists") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('playlists') })"
+            @click.stop="navigateTo('playlists')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+      <ItemsListing
+        itemtype="podcasts"
+        :load-items="loadGenrePodcasts"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("podcasts") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('podcasts') })"
+            @click.stop="navigateTo('podcasts')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+      <ItemsListing
+        itemtype="audiobooks"
+        :load-items="loadGenreAudiobooks"
+        :allow-collapse="true"
+        :show-favorites-only-filter="true"
+        :hide-on-empty="true"
+        :forced-view-mode="itemsViewMode"
+      >
+        <template #title>
+          <span>{{ $t("audiobooks") }}</span>
+          <SquareArrowRightEnter
+            :size="18"
+            class="navigate-icon"
+            :aria-label="$t('tooltip.view_all', { name: $t('audiobooks') })"
+            @click.stop="navigateTo('audiobooks')"
+          />
+        </template>
+      </ItemsListing>
+      <br />
+    </template>
+
+    <GenreAliasManager
+      v-if="itemDetails && canManageLibrary"
+      :genre="itemDetails"
+      :existing-genre-names="existingGenreNames"
+      @reload="loadItemDetails"
+    />
+  </section>
+</template>
+
+<script setup lang="ts">
+import EditorialMediaCard from "@/components/discover/EditorialMediaCard.vue";
+import EditorialShelf from "@/components/discover/EditorialShelf.vue";
+import GenreAliasManager from "@/components/genre/GenreAliasManager.vue";
+import InfoHeader from "@/components/InfoHeader.vue";
+import ItemsListing, { LoadDataParams } from "@/components/ItemsListing.vue";
+import { Button } from "@/components/ui/button";
+import { useDetailItemUpdates } from "@/composables/useDetailItemUpdates";
+import { useUserPreferences } from "@/composables/userPreferences";
+import { folderIdToRoute, genreMediaTypeIconMap } from "@/helpers/genre";
+import { panelViewItemResponsive } from "@/helpers/utils";
+import { api } from "@/plugins/api";
+import { itemIsAvailable } from "@/plugins/api/helpers";
+import {
+  Genre,
+  MediaItemTypeOrItemMapping,
+  MediaType,
+  Scope,
+} from "@/plugins/api/interfaces";
+import { authManager } from "@/plugins/auth";
+import { eventbus } from "@/plugins/eventbus";
+import { SquareArrowRightEnter } from "@lucide/vue";
+import { computed, ref, watch, type Component } from "vue";
+import { useI18n } from "vue-i18n";
+import { useRouter } from "vue-router";
+
+export interface Props {
+  itemId: string;
+  provider: string;
+}
+const props = defineProps<Props>();
+const itemDetails = ref<Genre>();
+const loading = ref(false);
+const loadingRows = ref(false);
+const overviewRows = ref<
+  Array<{
+    title: string;
+    items: MediaItemTypeOrItemMapping[];
+    icon?: string | Component;
+    action?: () => void;
+  }>
+>([]);
+const existingGenreNames = ref<Set<string>>(new Set());
+
+const { t } = useI18n();
+const router = useRouter();
+
+const canManageLibrary = computed(() =>
+  authManager.hasScope(Scope.LIBRARY_MANAGE),
+);
+
+type GenreViewMode = "discovery" | "list" | "panel" | "panel_compact";
+
+const { getPreference, setPreference } = useUserPreferences();
+const savedViewMode = getPreference<GenreViewMode>(
+  "genre_detail_view",
+  "discovery",
+);
+const viewMode = ref<GenreViewMode>(savedViewMode.value);
+const itemsViewMode = computed(() =>
+  viewMode.value !== "discovery"
+    ? (viewMode.value as "list" | "panel" | "panel_compact")
+    : undefined,
+);
+
+watch(viewMode, (newVal) => {
+  setPreference("genre_detail_view", newVal);
+});
+
+const displayRows = computed(() =>
+  overviewRows.value.filter((row) => row.items?.length),
+);
+
+// Responsive tile sizing, shared curve with the rest of the app.
+const tilesPerView = computed(() => panelViewItemResponsive(0) + 0.5);
+
+const viewModeIcon = computed(() => {
+  if (viewMode.value === "discovery") return "mdi-view-dashboard";
+  if (viewMode.value === "panel") return "mdi-grid";
+  if (viewMode.value === "panel_compact") return "mdi-view-comfy";
+  return "mdi-view-list";
+});
+
+const getViewModeLabel = function (mode: GenreViewMode) {
+  return t(`view.${mode}`);
+};
+
+const viewModeMenuLabel = computed(() =>
+  t("tooltip.view_mode_current", [getViewModeLabel(viewMode.value)]),
+);
+
+const openViewModeMenu = (e: MouseEvent) => {
+  eventbus.emit("contextmenu", {
+    items: [
+      {
+        label: "view.discovery",
+        icon: "mdi-view-dashboard",
+        selected: viewMode.value === "discovery",
+        action: () => {
+          viewMode.value = "discovery";
+        },
+      },
+      {
+        label: "view.list",
+        icon: "mdi-view-list",
+        selected: viewMode.value === "list",
+        action: () => {
+          viewMode.value = "list";
+        },
+      },
+      {
+        label: "view.panel",
+        icon: "mdi-grid",
+        selected: viewMode.value === "panel",
+        action: () => {
+          viewMode.value = "panel";
+        },
+      },
+      {
+        label: "view.panel_compact",
+        icon: "mdi-view-comfy",
+        selected: viewMode.value === "panel_compact",
+        action: () => {
+          viewMode.value = "panel_compact";
+        },
+      },
+    ],
+    posX: e.clientX,
+    posY: e.clientY,
+  });
+};
+
+const navigateTo = (routeName: string) => {
+  if (!itemDetails.value) return;
+  router.push({
+    name: routeName,
+    query: { genre_ids: itemDetails.value.item_id },
+  });
+};
+
+const loadItemDetails = async () => {
+  loading.value = true;
+  itemDetails.value = await api.getGenre(props.itemId, props.provider);
+  const allGenres = await api.getLibraryGenres();
+  existingGenreNames.value = new Set(
+    allGenres.map((g) => g.name.toLowerCase()),
+  );
+  loading.value = false;
+};
+
+const loadOverviewRows = async () => {
+  if (!itemDetails.value) return;
+  loadingRows.value = true;
+
+  try {
+    const recommendationFolders = await api.getGenreOverviewRows(
+      itemDetails.value.item_id,
+      itemDetails.value.provider,
+    );
+
+    if (recommendationFolders && recommendationFolders.length > 0) {
+      overviewRows.value = recommendationFolders.map((folder) => {
+        return {
+          title: folder.name || "",
+          items: folder.items || [],
+          icon: genreMediaTypeIconMap[folder.media_type],
+          action: () => {
+            if (!itemDetails.value) return;
+            const routeName = folderIdToRoute[folder.item_id];
+            if (routeName) {
+              router.push({
+                name: routeName,
+                query: { genre_ids: itemDetails.value.item_id },
+              });
+            }
+          },
+        };
+      });
+    } else {
+      overviewRows.value = [];
+    }
+  } catch (error) {
+    console.error("Failed to load genre overview:", error);
+    overviewRows.value = [];
+  }
+
+  // Fallback: if no overview rows returned, try loading the genre's tracks
+  if (overviewRows.value.length === 0) {
+    try {
+      const tracks = await api.getGenreTracks(itemDetails.value.item_id);
+      overviewRows.value = [
+        {
+          title: t("tracks"),
+          items: tracks,
+          icon: genreMediaTypeIconMap[MediaType.TRACK],
+        },
+      ];
+    } catch (error) {
+      console.error("Failed to load genre tracks:", error);
+      overviewRows.value = [];
+    }
+  }
+
+  loadingRows.value = false;
+};
+
+const genreId = () => parseInt(itemDetails.value!.item_id);
+
+const loadGenreArtists = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryArtists(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    undefined,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+const loadGenreAlbums = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryAlbums(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    undefined,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+const loadGenreTracks = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryTracks(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+const loadGenrePlaylists = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryPlaylists(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+const loadGenrePodcasts = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryPodcasts(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+const loadGenreAudiobooks = async (params: LoadDataParams) => {
+  if (!itemDetails.value) return [];
+  return await api.getLibraryAudiobooks(
+    params.favoritesOnly || undefined,
+    params.search,
+    undefined,
+    undefined,
+    params.sortBy,
+    params.provider?.length ? params.provider : undefined,
+    genreId(),
+  );
+};
+
+watch(
+  () => props.itemId,
+  (val) => {
+    if (val) loadItemDetails();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => itemDetails.value?.uri,
+  () => {
+    loadOverviewRows();
+  },
+);
+
+useDetailItemUpdates(itemDetails);
+</script>
+
+<style scoped>
+.rows-loading {
+  margin: 20px 0;
+}
+
+.overview-row {
+  margin-top: 10px;
+}
+
+.overview-row__nav {
+  align-self: center;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.overview-row__nav:hover {
+  opacity: 1;
+}
+
+.overview-container {
+  padding: 16px 10px 16px 10px;
+}
+
+.overview-container :deep(.ed-shelf) {
+  --ed-gutter: 16px;
+}
+
+.navigate-icon {
+  margin-left: 6px;
+  cursor: pointer;
+  opacity: 0.7;
+  vertical-align: middle;
+}
+
+.navigate-icon:hover {
+  opacity: 1;
+}
+</style>

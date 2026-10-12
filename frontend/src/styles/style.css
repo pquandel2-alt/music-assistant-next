@@ -1,0 +1,233 @@
+@import "tailwindcss/theme.css";
+@import "tailwindcss/utilities.css" important;
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* The play triangle's visual weight sits left of its box, so it looks
+   off-centre in a round button without this nudge. */
+@utility play-icon-centered {
+  translate: 6% 0;
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-warning: rgb(var(--v-theme-warning));
+  --color-warning-foreground: rgb(var(--v-theme-on-warning));
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  /* Hero-style overlay buttons: a faint text-colour wash while off, a solid
+     frosted box while on. The --overlay-* variables carry no defaults: the
+     overlay variant only works inside a panel that sets them (the fullscreen
+     player card does, per palette). */
+  --color-overlay: var(--overlay-bg);
+  --color-overlay-border: var(--overlay-border);
+  --color-overlay-foreground: var(--overlay-fg);
+  --color-overlay-muted: var(--overlay-muted-bg);
+  --color-overlay-muted-hover: var(--overlay-muted-hover);
+  --color-overlay-muted-border: var(--overlay-muted-border);
+}
+
+:root {
+  color-scheme: light;
+  --radius: 0.625rem;
+  /* Light theme - matching Vuetify light */
+  --background: #f5f5f5;
+  --foreground: #000000;
+  --card: #ffffff;
+  --card-foreground: #000000;
+  --popover: #ffffff;
+  --popover-foreground: #000000;
+  --primary: #635bff;
+  --primary-foreground: #ffffff;
+  --secondary: #e7e7e7;
+  --secondary-foreground: #000000;
+  --muted: #e7e7e7;
+  --muted-foreground: #666666;
+  --accent: #e7e7e7;
+  --accent-foreground: #000000;
+  --destructive: #d23939;
+  --border: #d4d4d4;
+  --input: #d4d4d4;
+  --ring: #635bff;
+  --chart-1: #635bff;
+  --chart-2: #4caf50;
+  --chart-3: #ff9800;
+  --chart-4: #9c27b0;
+  --chart-5: #f44336;
+  /* Sidebar tokens hardcoded (not indirected through --v-theme-*) because the
+     Vuetify theme vars are only defined on .v-application; declared at :root
+     they evaluate to the first-listed theme (light) and inherit downward,
+     defeating .dark. Keep these in lockstep with vuetify.ts panel colors. */
+  --sidebar: #ffffff;
+  --sidebar-foreground: #000000;
+  --sidebar-primary: #635bff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(0, 0, 0, 0.08);
+  --sidebar-accent-foreground: #000000;
+  --sidebar-border: rgba(0, 0, 0, 0.12);
+  --sidebar-ring: #635bff;
+}
+
+.dark {
+  color-scheme: dark;
+  /* Dark theme - matching Vuetify dark */
+  --background: #181818;
+  --foreground: #ffffff;
+  --card: #232323;
+  --card-foreground: #ffffff;
+  --popover: #232323;
+  --popover-foreground: #ffffff;
+  --primary: #635bff;
+  --primary-foreground: #ffffff;
+  --secondary: #2d2d2d;
+  --secondary-foreground: #ffffff;
+  --muted: #2d2d2d;
+  --muted-foreground: #a0a0a0;
+  --accent: #2d2d2d;
+  --accent-foreground: #ffffff;
+  --destructive: #ef4444;
+  --border: #3d3d3d;
+  --input: #3d3d3d;
+  --ring: #635bff;
+  --chart-1: #635bff;
+  --chart-2: #4caf50;
+  --chart-3: #ff9800;
+  --chart-4: #9c27b0;
+  --chart-5: #f44336;
+  --sidebar: #232323;
+  --sidebar-foreground: #ffffff;
+  --sidebar-primary: #635bff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 255, 255, 0.12);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.2);
+  --sidebar-ring: #635bff;
+}
+
+.player-control-button {
+  color: var(--muted-foreground) !important;
+}
+
+/* the ghost variant's own hover colour outranks the resting colour above, so a
+   suppressed button needs this to settle back. Weight and order both matter:
+   the open states below match this specificity and must win, and the floating
+   player's overrides are heavier still. */
+.player-control-button[data-suppress-hover="true"] {
+  color: var(--muted-foreground) !important;
+}
+
+/* the ghost variant paints a hover background as well as a colour, behind the
+   @media (hover: hover) Tailwind gates its hover: utilities with. These buttons
+   carry their state in the colour and the weight alone, so the pill goes in
+   every state; :root lifts this over the dark utility's extra .dark. */
+:root .player-control-button:hover {
+  background-color: transparent !important;
+}
+
+.player-control-button:hover:not([data-suppress-hover="true"]),
+.player-control-button[data-active="true"],
+.player-control-button[data-state="open"] {
+  color: var(--primary) !important;
+}
+
+/* the label takes the weight used by active mobile navigation. The player bar
+   sets the resting weight in a scoped block, so :root lets open states win. */
+:root .player-control-button[data-active="true"] .player-bar-action-label,
+:root .player-control-button[data-state="open"] .player-bar-action-label {
+  font-weight: 600;
+}
+
+.modal-backdrop {
+  background-color: rgba(0, 0, 0, 0.35) !important;
+  backdrop-filter: blur(4px);
+}
+
+/* the popouts grow with their content, up to the room the popper measured
+   between the player bar and the top of the screen */
+.player-bar-popout {
+  max-height: var(
+    --reka-popover-content-available-height,
+    calc(
+      100dvh - var(--player-bar-popout-top-gap) - var(--device-inset-top) -
+        var(--player-bar-popout-gap)
+    )
+  );
+}
+
+/* the popouts extend behind the mobile dock, so their content is inset to stay
+   scrollable past it; the dock rises from the navigation the popouts hang
+   above, so insetting by what it covers leaves them the popout gap. The marker
+   keeps desktop popouts untouched and lifts this above the equally-!important
+   p-0 utility they carry */
+:root[data-player-bar-overlay] .player-bar-popout {
+  padding-bottom: calc(
+    var(--player-bar-overlay-height) + var(--mobile-dock-rim)
+  ) !important;
+}
+
+.player-bar-popout[data-state="open"] {
+  animation: player-bar-popout-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both !important;
+}
+
+.player-bar-popout[data-state="closed"] {
+  animation: player-bar-popout-out 160ms ease-in both !important;
+}
+
+.player-bar-popout[data-drag-dismissed="true"][data-state="closed"] {
+  animation: none !important;
+}
+
+@keyframes player-bar-popout-in {
+  from {
+    opacity: 0;
+    transform: translateY(48px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes player-bar-popout-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(32px) scale(0.985);
+  }
+}

@@ -1,0 +1,594 @@
+<template>
+  <div>
+    <div class="tasks-header w-100">
+      <BackgroundTaskFilters @update:search="searchQuery = $event" />
+
+      <Button
+        v-if="canManageTasks"
+        class="clear-finished-btn"
+        variant="outline"
+        @click="clearFinishedTasks"
+      >
+        <Trash2 class="size-4" />
+        {{ t("background_tasks.clear_finished") }}
+      </Button>
+    </div>
+
+    <div class="pl-5 font-weight-medium">
+      {{
+        t("background_tasks.total", filteredTasks.length, {
+          named: { count: filteredTasks.length },
+        })
+      }}
+    </div>
+
+    <Container
+      :variant="viewMode === 'list' ? 'default' : 'panel'"
+      class="mt-4 px-5"
+    >
+      <div v-if="showInitialLoading" class="flex justify-center py-16">
+        <Spinner class="size-12" />
+      </div>
+
+      <ItemGroup
+        v-else-if="viewMode === 'list' && filteredTasks.length"
+        class="gap-2"
+      >
+        <BackgroundTaskItem
+          v-for="task in filteredTasks"
+          :key="task.id"
+          :task="task"
+          variant="list"
+          @click="showTaskDetails"
+          @menu="onMenu"
+        />
+      </ItemGroup>
+
+      <div
+        v-else-if="filteredTasks.length"
+        class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"
+      >
+        <BackgroundTaskItem
+          v-for="task in filteredTasks"
+          :key="task.id"
+          :task="task"
+          variant="card"
+          @click="showTaskDetails"
+          @menu="onMenu"
+        />
+      </div>
+
+      <Empty v-else class="border">
+        <EmptyMedia variant="icon">
+          <ListChecks />
+        </EmptyMedia>
+        <EmptyTitle>{{ emptyTitle }}</EmptyTitle>
+        <EmptyDescription>{{ emptyDescription }}</EmptyDescription>
+      </Empty>
+    </Container>
+
+    <BackgroundTaskDetailsDialog
+      v-model:open="detailsDialogOpen"
+      :task="selectedTask"
+      :log-text="taskLogText"
+      :log-loading="taskLogLoading"
+      :user-labels="userLabels"
+      @copy="copyLogs"
+      @download="downloadLogs"
+      @edit-schedule="editSelectedTaskSchedule"
+    />
+    <BackgroundTaskScheduleDialog
+      v-model:open="scheduleDialogOpen"
+      :task="scheduleTask"
+      :saving="scheduleDialogSaving"
+      @save="saveTaskSchedule"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import Container from "@/components/Container.vue";
+import BackgroundTaskDetailsDialog from "@/components/settings/background-tasks/BackgroundTaskDetailsDialog.vue";
+import BackgroundTaskFilters from "@/components/settings/background-tasks/BackgroundTaskFilters.vue";
+import BackgroundTaskItem from "@/components/settings/background-tasks/BackgroundTaskItem.vue";
+import BackgroundTaskScheduleDialog from "@/components/settings/background-tasks/BackgroundTaskScheduleDialog.vue";
+import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { ItemGroup } from "@/components/ui/item";
+import { Spinner } from "@/components/ui/spinner";
+import {
+  canEditTaskSchedule,
+  canRemoveTask,
+  canRunTaskManually,
+  isCancelableTask,
+  isRetryableTask,
+  isScheduledTask,
+} from "@/composables/background-tasks/useBackgroundTaskDisplay";
+import { useBackgroundTasks } from "@/composables/background-tasks/useBackgroundTasks";
+import { copyToClipboard } from "@/helpers/utils";
+import type { ContextMenuItem } from "@/helpers/context_menu_item";
+import { api } from "@/plugins/api";
+import {
+  type BackgroundTask,
+  type TaskSchedule,
+  type User,
+  Scope,
+  TaskStatus,
+} from "@/plugins/api/interfaces";
+import { authManager } from "@/plugins/auth";
+import { eventbus } from "@/plugins/eventbus";
+import { ListChecks, Trash2 } from "@lucide/vue";
+import { computed, inject, ref } from "vue";
+import { useI18n } from "vue-i18n";
+import { toast } from "vue-sonner";
+
+const tasksViewMode = inject<{
+  viewMode: { value: "list" | "card" };
+  toggleViewMode: () => void;
+}>("tasksViewMode")!;
+
+const detailsDialogOpen = ref(false);
+const scheduleDialogOpen = ref(false);
+const scheduleDialogSaving = ref(false);
+const searchQuery = ref("");
+const scheduleTask = ref<BackgroundTask | null>(null);
+const selectedTaskId = ref<string | null>(null);
+const taskLogText = ref("");
+const taskLogLoading = ref(false);
+const userLabels = ref<Record<string, string>>({});
+const usersLoaded = ref(false);
+
+const { t } = useI18n();
+const viewMode = computed(() => tasksViewMode.viewMode.value);
+const canManageTasks = computed(() =>
+  authManager.hasScope(Scope.SYSTEM_MANAGE),
+);
+const {
+  loading,
+  refreshTasks: refreshTasksState,
+  tasks,
+} = useBackgroundTasks();
+
+const selectedTask = computed<BackgroundTask | null>(() => {
+  if (!selectedTaskId.value) {
+    return null;
+  }
+  return tasks.value.find((task) => task.id === selectedTaskId.value) ?? null;
+});
+
+const showInitialLoading = computed(
+  () => loading.value && tasks.value.length === 0,
+);
+
+const filteredTasks = computed(() => {
+  const query = searchQuery.value.trim().toLowerCase();
+
+  return [...tasks.value]
+    .filter((task) => {
+      if (!query) {
+        return true;
+      }
+
+      const providerName = String(task.metadata.provider_name || "");
+      const mediaType = String(task.metadata.media_type || "");
+      const values = [
+        getTaskName(task),
+        task.name,
+        task.id,
+        task.status,
+        providerName,
+        mediaType,
+        task.last_error,
+        task.progress_text,
+        ...task.failure_messages,
+      ];
+
+      return values.some(
+        (value) =>
+          typeof value === "string" && value.toLowerCase().includes(query),
+      );
+    })
+    .sort((left, right) => {
+      const leftPriority = getPriority(left);
+      const rightPriority = getPriority(right);
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+      return right.updated_at.localeCompare(left.updated_at);
+    });
+});
+
+const emptyTitle = computed(() =>
+  tasks.value.length === 0
+    ? t("background_tasks.empty_title")
+    : t("no_content"),
+);
+
+const emptyDescription = computed(() =>
+  tasks.value.length === 0
+    ? t("background_tasks.empty_description")
+    : t("no_content_filter"),
+);
+
+const getErrorMessage = (error: unknown, fallback: string) => {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.length) {
+    return error;
+  }
+  return fallback;
+};
+
+const getTaskName = (task: BackgroundTask) => task.name;
+
+const clearFinishedTasks = async () => {
+  try {
+    await api.clearFinishedTasks();
+    await refreshTasksState();
+    if (
+      selectedTaskId.value &&
+      !tasks.value.some((task) => task.id === selectedTaskId.value)
+    ) {
+      detailsDialogOpen.value = false;
+      selectedTaskId.value = null;
+      taskLogText.value = "";
+      taskLogLoading.value = false;
+    }
+    toast.success(t("background_tasks.toast.history_cleared"));
+  } catch (error) {
+    toast.error(
+      getErrorMessage(error, t("background_tasks.toast.history_clear_failed")),
+    );
+  }
+};
+
+const runTask = async (task: BackgroundTask) => {
+  try {
+    await api.runTask(task.id, { showBackgroundTaskToast: false });
+    await refreshTasksState();
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.run_failed", [getTaskName(task)]),
+      ),
+    );
+  }
+};
+
+const toggleTaskEnabled = async (task: BackgroundTask) => {
+  if (!task.schedule) return;
+  const isEnabling = !task.schedule.enabled;
+  try {
+    await api.setTaskEnabled(task.id, isEnabling);
+    await refreshTasksState();
+    toast.success(
+      isEnabling
+        ? t("background_tasks.toast.schedule_enabled", [getTaskName(task)])
+        : t("background_tasks.toast.schedule_disabled", [getTaskName(task)]),
+    );
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        isEnabling
+          ? t("background_tasks.toast.schedule_enable_failed", [
+              getTaskName(task),
+            ])
+          : t("background_tasks.toast.schedule_disable_failed", [
+              getTaskName(task),
+            ]),
+      ),
+    );
+  }
+};
+
+const openScheduleDialog = (task: BackgroundTask) => {
+  scheduleTask.value = task;
+  scheduleDialogOpen.value = true;
+};
+
+const editSelectedTaskSchedule = () => {
+  if (!selectedTask.value?.schedule) {
+    return;
+  }
+  detailsDialogOpen.value = false;
+  openScheduleDialog(selectedTask.value);
+};
+
+const saveTaskSchedule = async (schedule: TaskSchedule) => {
+  if (!scheduleTask.value) return;
+  scheduleDialogSaving.value = true;
+  try {
+    await api.updateTaskSchedule(scheduleTask.value.id, {
+      schedule,
+    });
+    await refreshTasksState();
+    scheduleDialogOpen.value = false;
+    toast.success(
+      t("background_tasks.toast.schedule_updated", [
+        getTaskName(scheduleTask.value),
+      ]),
+    );
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.schedule_update_failed", [
+          getTaskName(scheduleTask.value),
+        ]),
+      ),
+    );
+  } finally {
+    scheduleDialogSaving.value = false;
+  }
+};
+
+const retryTask = async (task: BackgroundTask) => {
+  try {
+    await api.retryTask(task.id, { showBackgroundTaskToast: false });
+    await refreshTasksState();
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.retry_failed", [getTaskName(task)]),
+      ),
+    );
+  }
+};
+
+const cancelTask = async (task: BackgroundTask) => {
+  try {
+    await api.cancelTask(task.id);
+    await refreshTasksState();
+    toast.success(
+      t("background_tasks.toast.cancel_requested", [getTaskName(task)]),
+    );
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.cancel_failed", [getTaskName(task)]),
+      ),
+    );
+  }
+};
+
+const removeTask = async (task: BackgroundTask) => {
+  try {
+    await api.removeTask(task.id);
+    if (selectedTaskId.value === task.id) {
+      detailsDialogOpen.value = false;
+      selectedTaskId.value = null;
+      taskLogText.value = "";
+      taskLogLoading.value = false;
+    }
+    await refreshTasksState();
+    toast.success(t("background_tasks.toast.removed", [getTaskName(task)]));
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.remove_failed", [getTaskName(task)]),
+      ),
+    );
+  }
+};
+
+const ensureUserLabelsLoaded = async () => {
+  if (usersLoaded.value || !authManager.hasScope(Scope.USERS_READ)) {
+    return;
+  }
+  try {
+    const users = await api.getAllUsers();
+    userLabels.value = Object.fromEntries(
+      users.map((user: User) => [
+        user.user_id,
+        user.display_name || user.username || user.user_id,
+      ]),
+    );
+    usersLoaded.value = true;
+  } catch {
+    // Ignore user lookup failures in the details dialog.
+  }
+};
+
+const showTaskDetails = async (task: BackgroundTask) => {
+  selectedTaskId.value = task.id;
+  detailsDialogOpen.value = true;
+  taskLogText.value = "";
+  taskLogLoading.value = true;
+  void ensureUserLabelsLoaded();
+  try {
+    const logText = await api.getTaskLog(task.id);
+    if (selectedTaskId.value === task.id) {
+      taskLogText.value = logText;
+    }
+  } catch (error) {
+    toast.error(
+      getErrorMessage(
+        error,
+        t("background_tasks.toast.log_load_failed", [getTaskName(task)]),
+      ),
+    );
+  } finally {
+    if (selectedTaskId.value === task.id) {
+      taskLogLoading.value = false;
+    }
+  }
+};
+
+const copyLogs = async () => {
+  const copied = await copyToClipboard(taskLogText.value);
+  if (copied) {
+    toast.success(t("background_tasks.toast.log_copied"));
+  } else {
+    toast.error(t("background_tasks.toast.log_copy_failed"));
+  }
+};
+
+const downloadLogs = () => {
+  if (!selectedTask.value) return;
+  if (!taskLogText.value) {
+    toast.error(t("background_tasks.toast.log_download_failed"));
+    return;
+  }
+  const url = window.URL.createObjectURL(
+    new Blob([taskLogText.value], { type: "text/plain" }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${selectedTask.value.id}.log`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  // Revoke after the browser has had a chance to start the download. Revoking
+  // synchronously right after click() can race the download and produce an
+  // empty file in some browsers.
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  toast.success(t("background_tasks.toast.log_download_started"));
+};
+
+const getContextMenuPosition = (
+  event: Event,
+): { posX: number; posY: number } => {
+  if (event instanceof MouseEvent) {
+    return { posX: event.clientX, posY: event.clientY };
+  }
+
+  const target =
+    event.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : event.target instanceof HTMLElement
+        ? event.target
+        : null;
+
+  if (!target) {
+    return { posX: 0, posY: 0 };
+  }
+
+  const rect = target.getBoundingClientRect();
+  return {
+    posX: rect.left + rect.width / 2,
+    posY: rect.top + rect.height / 2,
+  };
+};
+
+const onMenu = (event: Event, task: BackgroundTask) => {
+  const menuItems: ContextMenuItem[] = [
+    {
+      label: "background_tasks.view_details",
+      action: () => {
+        void showTaskDetails(task);
+      },
+      icon: "mdi-file-document-outline",
+    },
+    {
+      label: "background_tasks.edit_schedule",
+      action: () => {
+        openScheduleDialog(task);
+      },
+      icon: "mdi-timer-edit-outline",
+      hide: !canManageTasks.value || !canEditTaskSchedule(task),
+    },
+    {
+      label: "background_tasks.run_now",
+      action: () => {
+        void runTask(task);
+      },
+      icon: "mdi-play",
+      hide: !canManageTasks.value || !canRunTaskManually(task),
+    },
+    {
+      label: task.schedule?.enabled
+        ? "background_tasks.disable_schedule"
+        : "background_tasks.enable_schedule",
+      action: () => {
+        void toggleTaskEnabled(task);
+      },
+      icon: task.schedule?.enabled
+        ? "mdi-calendar-remove"
+        : "mdi-calendar-check",
+      hide: !canManageTasks.value || !isScheduledTask(task),
+    },
+    {
+      label: "background_tasks.retry",
+      action: () => {
+        void retryTask(task);
+      },
+      icon: "mdi-refresh",
+      hide:
+        !canManageTasks.value || !(task.allow_retry && isRetryableTask(task)),
+    },
+    {
+      label: "background_tasks.cancel",
+      action: () => {
+        void cancelTask(task);
+      },
+      icon: "mdi-cancel",
+      hide:
+        !canManageTasks.value || !(task.allow_cancel && isCancelableTask(task)),
+    },
+    {
+      label: "background_tasks.remove_history",
+      action: () => {
+        void removeTask(task);
+      },
+      icon: "mdi-delete",
+      color: "error",
+      hide: !canManageTasks.value || !canRemoveTask(task),
+    },
+  ];
+
+  eventbus.emit("contextmenu", {
+    items: menuItems,
+    ...getContextMenuPosition(event),
+  });
+};
+
+const getPriority = (task: BackgroundTask) => {
+  if (task.status === TaskStatus.RUNNING) return 0;
+  if (task.status === TaskStatus.PENDING) return 1;
+  if (isScheduledTask(task)) return 2;
+  return 3;
+};
+</script>
+
+<style scoped>
+.tasks-header {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 20px 20px 6px 20px;
+}
+
+.clear-finished-btn {
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.tasks-header :deep(.filters-container) {
+  align-items: flex-start;
+}
+
+@media (max-width: 960px) {
+  .tasks-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .clear-finished-btn {
+    width: 100%;
+    align-self: stretch;
+  }
+}
+</style>

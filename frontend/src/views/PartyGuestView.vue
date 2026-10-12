@@ -1,0 +1,670 @@
+<template>
+  <div class="guest-view">
+    <!-- Listen in (shared audio) -->
+    <PartyListenIn />
+
+    <!-- Search: same dropdown experience as the quiz setup; picking a track
+         shows it below with the boost/request actions, picking an artist
+         drills into that artist's tracks -->
+    <div class="search-section">
+      <MediaSearch
+        :allowed-media-types="[MediaType.TRACK, MediaType.ARTIST]"
+        :placeholder="$t('providers.party.guest_page.search_placeholder')"
+        @select="onSearchSelect"
+      />
+    </div>
+
+    <!-- Artist Tracks View (when drilling into an artist) -->
+    <div v-if="selectedArtist" class="results-section">
+      <div class="section-header">
+        <Button
+          variant="ghost"
+          size="sm"
+          class="back-btn"
+          @click="clearArtistSelection"
+        >
+          <ArrowLeft :size="16" />
+          {{ $t("back") }}
+        </Button>
+        <h2 class="section-title artist-title">
+          {{ selectedArtist.name }}
+        </h2>
+        <div v-if="rateLimitingEnabled" class="tokens-row">
+          <PartyTokensBadge
+            v-if="boostEnabled"
+            :tokens="boostTokens"
+            :max-tokens="BOOST_MAX_TOKENS"
+            :countdown="nextTokenCountdown"
+            :label="$t('providers.party.guest_page.boost_available')"
+            :color="boostBadgeColor"
+            icon="boost"
+          />
+          <PartyTokensBadge
+            v-if="addQueueEnabled"
+            :tokens="addQueueTokens"
+            :max-tokens="ADD_QUEUE_MAX_TOKENS"
+            :countdown="addQueueTokenCountdown"
+            :label="$t('providers.party.guest_page.add_available')"
+            :color="requestBadgeColor"
+            icon="request"
+          />
+        </div>
+      </div>
+      <!-- Loading state -->
+      <div v-if="loadingArtistTracks" class="loading-state">
+        <Spinner class="size-12 text-primary" />
+        <p>{{ $t("providers.party.guest_page.loading_tracks") }}</p>
+      </div>
+      <!-- Artist tracks list -->
+      <div v-else-if="artistTracks.length > 0" class="results-list">
+        <PartyResultItem
+          v-for="track in artistTracks"
+          :key="`track-${track.item_id}`"
+          :item="track"
+          :boost-enabled="boostEnabled"
+          :add-queue-enabled="addQueueEnabled"
+          :rate-limiting-enabled="rateLimitingEnabled"
+          :boost-tokens="boostTokens"
+          :add-queue-tokens="addQueueTokens"
+          :boost-badge-color="boostBadgeColor"
+          :request-badge-color="requestBadgeColor"
+          :adding-items="addingItems"
+          :added-items="shownAddedItems"
+          :queued-uris="queuedUris"
+          :is-expanded="
+            expandedResultItemId === `${track.media_type}-${track.item_id}`
+          "
+          @add-to-queue="addToQueue"
+          @toggle-expand="toggleExpandedResult"
+        />
+      </div>
+      <!-- Empty state for no tracks -->
+      <div v-else class="empty-state">
+        <Music :size="64" class="text-muted-foreground" />
+        <p>{{ $t("providers.party.guest_page.no_tracks_for_artist") }}</p>
+      </div>
+    </div>
+
+    <!-- Picked track: shows the boost/request actions for a track chosen
+         from the search dropdown -->
+    <div v-else-if="pickedTrack" class="results-section picked-track-section">
+      <div class="section-header">
+        <Button
+          variant="ghost"
+          size="icon"
+          class="back-btn"
+          :aria-label="$t('close')"
+          @click="pickedTrack = null"
+        >
+          <X :size="16" />
+        </Button>
+        <div v-if="rateLimitingEnabled" class="tokens-row">
+          <PartyTokensBadge
+            v-if="boostEnabled"
+            :tokens="boostTokens"
+            :max-tokens="BOOST_MAX_TOKENS"
+            :countdown="nextTokenCountdown"
+            :label="$t('providers.party.guest_page.boost_available')"
+            :color="boostBadgeColor"
+            icon="boost"
+          />
+          <PartyTokensBadge
+            v-if="addQueueEnabled"
+            :tokens="addQueueTokens"
+            :max-tokens="ADD_QUEUE_MAX_TOKENS"
+            :countdown="addQueueTokenCountdown"
+            :label="$t('providers.party.guest_page.add_available')"
+            :color="requestBadgeColor"
+            icon="request"
+          />
+        </div>
+      </div>
+      <PartyResultItem
+        :item="pickedTrack"
+        :boost-enabled="boostEnabled"
+        :add-queue-enabled="addQueueEnabled"
+        :rate-limiting-enabled="rateLimitingEnabled"
+        :boost-tokens="boostTokens"
+        :add-queue-tokens="addQueueTokens"
+        :boost-badge-color="boostBadgeColor"
+        :request-badge-color="requestBadgeColor"
+        :adding-items="addingItems"
+        :added-items="shownAddedItems"
+        :queued-uris="queuedUris"
+        :is-expanded="true"
+        @add-to-queue="addToQueue"
+      />
+    </div>
+
+    <!-- Current Queue Section -->
+    <PartyQueueSection
+      v-if="!selectedArtist"
+      ref="queueSectionRef"
+      :queue-items="queueItems"
+      :queue-fetch-offset="queueFetchOffset"
+      :current-queue-index="currentQueueIndex"
+      :is-playing="isPlaying"
+      :loading-more-queue-items="loadingMoreQueueItems"
+      :skip-song-enabled="skipSongEnabled"
+      :rate-limiting-enabled="rateLimitingEnabled"
+      :skip-song-tokens="skipSongTokens"
+      :skipping-song="skippingSong"
+      :skip-token-countdown="skipTokenCountdown"
+      :boost-badge-color="boostBadgeColor"
+      :request-badge-color="requestBadgeColor"
+      :boost-enabled="boostEnabled"
+      :boost-tokens="boostTokens"
+      :boosting-item-id="boostingQueueItemId"
+      @skip="skipCurrentSong"
+      @queue-scroll="handleQueueScroll"
+      @boost-queue-item="boostQueueItem"
+    />
+  </div>
+</template>
+
+<script setup lang="ts">
+import MediaSearch from "@/components/MediaSearch.vue";
+import PartyListenIn from "@/components/party/PartyListenIn.vue";
+import PartyQueueSection from "@/components/party/PartyQueueSection.vue";
+import PartyResultItem from "@/components/party/PartyResultItem.vue";
+import PartyTokensBadge from "@/components/party/PartyTokensBadge.vue";
+import { Button } from "@/components/ui/button";
+import Spinner from "@/components/ui/spinner/Spinner.vue";
+import { useGuestArtistTracks } from "@/composables/guest/useGuestArtistTracks";
+import { useGuestQueue } from "@/composables/guest/useGuestQueue";
+import { usePartyConfig } from "@/composables/usePartyConfig";
+import { useRateLimiting } from "@/composables/useRateLimiting";
+import { queuedGuestTrackUris } from "@/helpers/queue_position";
+import api from "@/plugins/api";
+import {
+  type Artist,
+  type EventMessage,
+  EventType,
+  type MediaItemTypeOrItemMapping,
+  MediaType,
+  PlaybackState,
+  type QueueItem,
+  type Track,
+} from "@/plugins/api/interfaces";
+import { $t } from "@/plugins/i18n";
+import { ArrowLeft, Music, X } from "@lucide/vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import { toast } from "vue-sonner";
+
+// --- Composables ---
+const { config: partyConfig, fetchConfig } = usePartyConfig();
+const rateLimit = useRateLimiting();
+const {
+  rateLimitingEnabled,
+  boostEnabled,
+  addQueueEnabled,
+  skipSongEnabled,
+  requestBadgeColor,
+  boostBadgeColor,
+  boostTokens,
+  addQueueTokens,
+  skipSongTokens,
+  BOOST_MAX_TOKENS,
+  ADD_QUEUE_MAX_TOKENS,
+  nextTokenCountdown,
+  addQueueTokenCountdown,
+  skipTokenCountdown,
+  consumeBoostToken,
+  consumeAddQueueToken,
+  consumeSkipSongToken,
+  getTimeUntilNextToken,
+  getTimeUntilNextAddQueueToken,
+  getTimeUntilNextSkipToken,
+} = rateLimit;
+
+const queue = useGuestQueue();
+const {
+  queueItems,
+  queueFetchOffset,
+  loadingMoreQueueItems,
+  partyQueueId,
+  currentQueue,
+  currentQueueIndex,
+  fetchQueueItems,
+  handleQueueScroll,
+} = queue;
+
+// Read from the same queue that positions the badge, so the row and the play
+// state can never disagree.
+const isPlaying = computed(
+  () => currentQueue.value?.state === PlaybackState.PLAYING,
+);
+
+const {
+  selectedArtist,
+  artistTracks,
+  loadingArtistTracks,
+  selectArtist,
+  clearArtistSelection,
+} = useGuestArtistTracks();
+
+// a track picked from the search dropdown, offered with the queue actions
+const pickedTrack = ref<Track | null>(null);
+
+const onSearchSelect = (item: MediaItemTypeOrItemMapping) => {
+  if (item.media_type === MediaType.ARTIST) {
+    pickedTrack.value = null;
+    selectArtist(item as Artist);
+  } else if (item.media_type === MediaType.TRACK) {
+    clearArtistSelection();
+    pickedTrack.value = item as Track;
+  }
+};
+
+const queuedUris = computed(() =>
+  queuedGuestTrackUris(
+    queueItems.value,
+    partyConfig.value?.prevent_duplicate_tracks ?? true,
+  ),
+);
+
+// --- Template-specific state ---
+const addingItems = ref(new Set<string>());
+const addedItems = ref(new Set<string>());
+// only shown while duplicates are prevented, so toggling the setting takes effect right away
+const shownAddedItems = computed(() =>
+  (partyConfig.value?.prevent_duplicate_tracks ?? true)
+    ? addedItems.value
+    : new Set<string>(),
+);
+const skippingSong = ref(false);
+const boostingQueueItemId = ref("");
+const expandedResultItemId = ref("");
+
+const toggleExpandedResult = (itemId: string) => {
+  expandedResultItemId.value =
+    expandedResultItemId.value === itemId ? "" : itemId;
+};
+const queueSectionRef = ref<InstanceType<typeof PartyQueueSection> | null>(
+  null,
+);
+
+// Sync the queue section's listRef to the composable's queueListRef for auto-scroll.
+// Also scroll to the current item whenever the list becomes available (e.g. after
+// search is cleared and PartyQueueSection remounts).
+watch(
+  () => queueSectionRef.value?.listRef,
+  (el) => {
+    queue.queueListRef.value = el ?? null;
+    if (el) {
+      nextTick(() => queue.scrollToCurrentItem());
+    }
+  },
+);
+
+// --- Back navigation ---
+const handleBack = () => {
+  if (selectedArtist.value || pickedTrack.value) {
+    if (selectedArtist.value) {
+      clearArtistSelection();
+      // Scroll is triggered by the watcher above when PartyQueueSection remounts
+    } else {
+      pickedTrack.value = null;
+    }
+    // popstate cannot be canceled: re-arm the history entry so the next
+    // back press is caught here again instead of leaving the page
+    history.pushState(null, "", location.href);
+  }
+};
+
+// --- Action glue (bridges rate limiting + API + snackbar) ---
+const addToQueue = async (item: Track | Artist, position: "next" | "end") => {
+  if (position === "next" && !boostEnabled.value) {
+    toast.warning($t("providers.party.guest_page.boost_disabled"));
+    return;
+  }
+  if (position === "end" && !addQueueEnabled.value) {
+    toast.warning($t("providers.party.guest_page.add_queue_disabled"));
+    return;
+  }
+
+  if (rateLimitingEnabled.value) {
+    if (position === "next" && boostTokens.value <= 0) {
+      const minutesUntilNext = getTimeUntilNextToken();
+      toast.warning(
+        $t("providers.party.guest_page.boost_limit_reached", [
+          minutesUntilNext,
+        ]),
+      );
+      return;
+    }
+    if (position === "end" && addQueueTokens.value <= 0) {
+      const minutesUntilNext = getTimeUntilNextAddQueueToken();
+      toast.warning(
+        $t("providers.party.guest_page.add_queue_limit_reached", [
+          minutesUntilNext,
+        ]),
+      );
+      return;
+    }
+  }
+
+  const key = `${item.media_type}-${item.item_id}-${position}`;
+  if (addingItems.value.has(key)) return;
+  addingItems.value.add(key);
+
+  try {
+    const result = (await api.sendCommand("party/add_to_queue", {
+      uri: item.uri,
+      boost: position === "next",
+    })) as { success: boolean; boosted: boolean; started_playback: boolean };
+
+    if (!result.success) {
+      throw new Error("Server rejected the request");
+    }
+
+    if (rateLimitingEnabled.value) {
+      if (position === "next") {
+        consumeBoostToken();
+      } else {
+        consumeAddQueueToken();
+      }
+    }
+
+    addedItems.value.add(item.uri);
+
+    const message =
+      position === "next"
+        ? $t("providers.party.guest_page.item_boosted", [item.name])
+        : $t("providers.party.guest_page.item_added_to_queue", [item.name]);
+    toast.success(message);
+  } catch (error) {
+    console.error("Failed to add to queue:", error);
+    toast.error($t("providers.party.guest_page.add_to_queue_failed"));
+  } finally {
+    addingItems.value.delete(key);
+  }
+};
+
+const boostQueueItem = async (item: QueueItem) => {
+  if (!boostEnabled.value) {
+    toast.warning($t("providers.party.guest_page.boost_disabled"));
+    return;
+  }
+
+  if (rateLimitingEnabled.value && boostTokens.value <= 0) {
+    const minutesUntilNext = getTimeUntilNextToken();
+    toast.warning(
+      $t("providers.party.guest_page.boost_limit_reached", [minutesUntilNext]),
+    );
+    return;
+  }
+
+  if (boostingQueueItemId.value === item.queue_item_id) return;
+  boostingQueueItemId.value = item.queue_item_id;
+  try {
+    const result = (await api.sendCommand("party/boost_queue_item", {
+      queue_item_id: item.queue_item_id,
+    })) as { success: boolean };
+
+    if (!result.success) {
+      throw new Error("Server rejected the request");
+    }
+
+    if (rateLimitingEnabled.value) {
+      consumeBoostToken();
+    }
+
+    const name = item.media_item?.name || item.name;
+    toast.success($t("providers.party.guest_page.item_boosted", [name]));
+  } catch (error) {
+    console.error("Failed to boost queue item:", error);
+    toast.error($t("providers.party.guest_page.add_to_queue_failed"));
+  } finally {
+    boostingQueueItemId.value = "";
+  }
+};
+
+const skipCurrentSong = async () => {
+  if (!skipSongEnabled.value) {
+    toast.warning($t("providers.party.guest_page.skip_disabled"));
+    return;
+  }
+
+  if (rateLimitingEnabled.value && skipSongTokens.value <= 0) {
+    const minutesUntilNext = getTimeUntilNextSkipToken();
+    toast.warning(
+      $t("providers.party.guest_page.skip_limit_reached", [minutesUntilNext]),
+    );
+    return;
+  }
+
+  skippingSong.value = true;
+  try {
+    const result = (await api.sendCommand("party/skip")) as {
+      success: boolean;
+    };
+
+    if (!result.success) {
+      throw new Error("Server rejected the request");
+    }
+
+    if (rateLimitingEnabled.value) {
+      consumeSkipSongToken();
+    }
+
+    toast.success($t("providers.party.guest_page.song_skipped"));
+  } catch (error) {
+    console.error("Failed to skip song:", error);
+    toast.error($t("providers.party.guest_page.skip_failed"));
+  } finally {
+    skippingSong.value = false;
+  }
+};
+
+// React to party config changes (e.g., admin changes rate limits or badge colors)
+watch(partyConfig, (newConfig) => {
+  if (newConfig) {
+    rateLimit.configure(newConfig);
+  }
+});
+
+// --- Lifecycle ---
+let cleanupCountdown: (() => void) | null = null;
+let cleanupQueueEvents: (() => void) | null = null;
+let cleanupProvidersSub: (() => void) | null = null;
+let cleanupQueueUpdatedSub: (() => void) | null = null;
+
+// Set by the unmount hook, so the startup below can tell that the view it is
+// setting things up for is already gone.
+let unmounted = false;
+
+const refreshPartyPlayer = async () => {
+  try {
+    const partyPlayerId = await api.sendCommand<string | null>("party/player");
+    partyQueueId.value = partyPlayerId;
+  } catch (error) {
+    console.error("Failed to fetch party player:", error);
+  }
+};
+
+const fetchAndApplyConfig = async () => {
+  const config = await fetchConfig();
+  if (config) {
+    rateLimit.configure(config);
+  }
+};
+
+onMounted(async () => {
+  await fetchAndApplyConfig();
+  // Each await can outlast the view, and the unmount hook only reaches what
+  // was already set up by the time it ran.
+  if (unmounted) return;
+
+  history.pushState(null, "", location.href);
+  window.addEventListener("popstate", handleBack);
+
+  cleanupCountdown = rateLimit.startCountdown();
+
+  await refreshPartyPlayer();
+  if (unmounted) return;
+
+  fetchQueueItems();
+  cleanupQueueEvents = queue.subscribeToEvents();
+
+  // Re-fetch player when party config changes
+  const unsubProviders = api.subscribe(
+    EventType.PROVIDERS_UPDATED,
+    async () => {
+      await refreshPartyPlayer();
+      fetchQueueItems(true);
+    },
+  );
+  cleanupProvidersSub = unsubProviders;
+
+  // Re-resolve party player when a different queue starts playing (auto mode)
+  const unsubQueueUpdated = api.subscribe(
+    EventType.QUEUE_UPDATED,
+    async (evt: EventMessage) => {
+      if (evt.object_id !== partyQueueId.value) {
+        const updatedQueue = api.queues[evt.object_id as string];
+        if (updatedQueue?.state === PlaybackState.PLAYING) {
+          await refreshPartyPlayer();
+          fetchQueueItems(true);
+        }
+      }
+    },
+  );
+  cleanupQueueUpdatedSub = unsubQueueUpdated;
+});
+
+onBeforeUnmount(() => {
+  unmounted = true;
+  window.removeEventListener("popstate", handleBack);
+  cleanupQueueEvents?.();
+  cleanupCountdown?.();
+  cleanupProvidersSub?.();
+  cleanupQueueUpdatedSub?.();
+});
+</script>
+
+<style scoped>
+.guest-view {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  padding-bottom: 1.5rem;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.section-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid rgba(var(--v-theme-primary), 0.2);
+  flex: 1;
+}
+
+.tokens-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.results-section {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.results-section .section-header {
+  flex-shrink: 0;
+}
+
+.results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  padding-right: 0.5rem;
+}
+
+.back-btn {
+  flex-shrink: 0;
+}
+
+.artist-title {
+  flex: 1;
+  text-align: center;
+}
+
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem;
+  gap: 1rem;
+  opacity: 0.7;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 4rem 2rem;
+  opacity: 0.6;
+}
+
+.empty-state p {
+  font-size: 1.125rem;
+  margin-top: 1rem;
+}
+
+.empty-hint {
+  font-size: 0.875rem;
+  opacity: 0.7;
+}
+
+@media (max-width: 768px) {
+  .guest-view {
+    padding: 0.75rem;
+    padding-bottom: 0.75rem;
+  }
+
+  .section-header {
+    margin-bottom: 0.5rem;
+  }
+
+  .section-title {
+    font-size: 1.1rem;
+    padding-bottom: 0.25rem;
+  }
+
+  .results-list {
+    gap: 0.5rem;
+    padding-right: 0.25rem;
+  }
+}
+</style>

@@ -1,0 +1,1163 @@
+import { computed, toValue, type Component, type MaybeRefOrGetter } from "vue";
+import { useI18n } from "vue-i18n";
+import {
+  AudioLines,
+  File as FileIcon,
+  FileAudio,
+  Gauge,
+  Merge,
+  SlidersHorizontal,
+  Speaker,
+  Split,
+} from "@lucide/vue";
+import { useDSPPresets } from "@/composables/useDSPPresets";
+import { useDSPIRs } from "@/composables/useDSPIRs";
+import CrossfadeIcon from "@/layouts/default/PlayerOSD/PlayerControlBtn/CrossfadeIcon.vue";
+import {
+  audioQualityToTier,
+  type QualityTier,
+} from "@/composables/useStreamQuality";
+import { dspFilterIcon, dspFilterText } from "@/helpers/audioProcessing";
+import { getPlayerDisplayName } from "@/helpers/players";
+import api from "@/plugins/api";
+import {
+  AudioChannel,
+  type AudioDSPDetails,
+  type AudioFormat,
+  type AudioNormalizationDetails,
+  type AudioOutputDetails,
+  type AudioProcessingChain,
+  AudioQuality,
+  ContentType,
+  CrossfadeMode,
+  DSPFilterType,
+  DSPState,
+  type Player,
+  type StreamDetails,
+  VolumeNormalizationMode,
+} from "@/plugins/api/interfaces";
+
+type TranslationValue = string | number;
+type Translate = (key: string, values?: TranslationValue[]) => string;
+
+interface AudioProcessingDisplayStageBase {
+  key: string;
+  title: string;
+  subtitleParts?: string[];
+  atomicSubtitleParts?: boolean;
+  badge?: string;
+  details?: string[];
+}
+
+export type AudioProcessingDisplayStage = AudioProcessingDisplayStageBase &
+  (
+    | {
+        icon: Component;
+        providerIconDomain?: never;
+      }
+    | {
+        icon?: never;
+        providerIconDomain: string;
+      }
+  );
+
+export interface AudioProcessingOutputDisplay {
+  key: string;
+  playerIds: string[];
+  qualityTier: QualityTier;
+  qualityLabel: string;
+  stages: AudioProcessingDisplayStage[];
+  destination: AudioProcessingDisplayStage;
+}
+
+export interface AudioProcessingDetailsDisplay {
+  inputQualityTier: QualityTier;
+  inputQualityLabel: string;
+  inputStages: AudioProcessingDisplayStage[];
+  processingStages: AudioProcessingDisplayStage[];
+  outputPaths: AudioProcessingOutputDisplay[];
+}
+
+// the fields of Player the display builder reads, derived so they cannot drift
+// from the player model
+export type AudioProcessingDisplayPlayer = Pick<
+  Player,
+  | "player_id"
+  | "name"
+  | "provider"
+  | "active_output_protocol"
+  | "output_protocols"
+>;
+
+export interface AudioProcessingDetailsDependencies {
+  translate: Translate;
+  locale: string;
+  getProviderName: (providerId: string) => string;
+  getProviderDomain: (providerId: string) => string | undefined;
+  getPresetName: (presetId: string | null | undefined) => string | undefined;
+  getIRName: (irId: string | null | undefined) => string | undefined;
+  getPlayerName: (player: AudioProcessingDisplayPlayer) => string;
+  players: Record<string, AudioProcessingDisplayPlayer>;
+}
+
+const KNOWN_CONTENT_TYPES = new Set<string>(Object.values(ContentType));
+const PCM_CONTENT_TYPES = new Set<string>([
+  ContentType.PCM_S16LE,
+  ContentType.PCM_S24LE,
+  ContentType.PCM_S32LE,
+  ContentType.PCM_F32LE,
+  ContentType.PCM_F64LE,
+  ContentType.PCM_S16BE,
+  ContentType.PCM_S24BE,
+  ContentType.PCM_S32BE,
+  ContentType.PCM_BLURAY,
+  ContentType.PCM_DVD,
+]);
+const FLOAT_PCM_CONTENT_TYPES = new Set<string>([
+  ContentType.PCM_F32LE,
+  ContentType.PCM_F64LE,
+]);
+const LOSSY_AUDIO_CODECS = new Set<string>([
+  ContentType.AAC,
+  ContentType.AC3,
+  ContentType.ADPCM_IMA,
+  ContentType.ADPCM_MS,
+  ContentType.ADPCM_SWF,
+  ContentType.AMR,
+  ContentType.AMR_WB,
+  ContentType.ATRAC3,
+  ContentType.COOK,
+  ContentType.DRA,
+  ContentType.DTS,
+  ContentType.EAC3,
+  ContentType.G722,
+  ContentType.G726,
+  ContentType.MP1,
+  ContentType.MP2,
+  ContentType.MP3,
+  ContentType.MUSEPACK,
+  ContentType.OPUS,
+  ContentType.PCM_ALAW,
+  ContentType.PCM_MULAW,
+  ContentType.SPEEX,
+  ContentType.VORBIS,
+  ContentType.WMA,
+  ContentType.WMAPRO,
+  ContentType.WMAV2,
+]);
+
+export function useAudioProcessingDetails(
+  chain: MaybeRefOrGetter<AudioProcessingChain>,
+  streamDetails: MaybeRefOrGetter<StreamDetails>,
+  crossfadeIntent: MaybeRefOrGetter<CrossfadeMode | undefined> = undefined,
+) {
+  const { t, locale } = useI18n({ useScope: "global" });
+  const { getPresetName } = useDSPPresets({ optional: true });
+  const { getIRName } = useDSPIRs({ optional: true });
+  const translate: Translate = (key, values) =>
+    values ? t(key, values) : t(key);
+  const display = computed(() => {
+    void locale.value;
+    return buildAudioProcessingDetailsDisplay(
+      toValue(chain),
+      toValue(streamDetails),
+      {
+        translate,
+        locale: locale.value,
+        getProviderName: (providerId) => api.getProviderName(providerId),
+        getProviderDomain: (providerId) =>
+          api.getProviderManifest(providerId)?.domain,
+        getPresetName,
+        getIRName,
+        getPlayerName: getPlayerDisplayName,
+        players: api.players,
+      },
+      toValue(crossfadeIntent),
+    );
+  });
+
+  return {
+    inputQualityTier: computed(() => display.value.inputQualityTier),
+    inputQualityLabel: computed(() => display.value.inputQualityLabel),
+    inputStages: computed(() => display.value.inputStages),
+    processingStages: computed(() => display.value.processingStages),
+    outputPaths: computed(() => display.value.outputPaths),
+  };
+}
+
+export function buildAudioProcessingDetailsDisplay(
+  chain: AudioProcessingChain,
+  streamDetails: StreamDetails,
+  dependencies: AudioProcessingDetailsDependencies,
+  crossfadeIntent?: CrossfadeMode,
+): AudioProcessingDetailsDisplay {
+  return {
+    inputQualityTier: audioQualityToTier(chain.input_fidelity.quality),
+    inputQualityLabel: audioQualityLabel(
+      chain.input_fidelity.quality,
+      dependencies.translate,
+    ),
+    inputStages: buildInputStages(streamDetails, dependencies),
+    processingStages: buildProcessingStages(
+      streamDetails,
+      chain,
+      dependencies,
+      crossfadeIntent,
+    ),
+    outputPaths: chain.outputs.map((output, index) =>
+      buildOutputDisplay(output, index, dependencies),
+    ),
+  };
+}
+
+function buildInputStages(
+  streamDetails: StreamDetails,
+  dependencies: AudioProcessingDetailsDependencies,
+): AudioProcessingDisplayStage[] {
+  return [
+    {
+      key: "provider",
+      providerIconDomain: streamDetails.provider,
+      title: dependencies.getProviderName(streamDetails.provider),
+    },
+    formatStage(
+      "source-format",
+      streamDetails.audio_format,
+      dependencies.translate,
+      dependencies.locale,
+    ),
+  ];
+}
+
+function buildProcessingStages(
+  streamDetails: StreamDetails,
+  chain: AudioProcessingChain,
+  dependencies: AudioProcessingDetailsDependencies,
+  crossfadeIntent?: CrossfadeMode,
+): AudioProcessingDisplayStage[] {
+  const { translate } = dependencies;
+  const stages: AudioProcessingDisplayStage[] = [];
+  const processing = chain.queue_processing;
+  // a step the source performed is named after the service that did it
+  const sourceName = dependencies.getProviderName(streamDetails.provider);
+  // such a step is listed too, but it leaves the shared path direct
+  let serverAltersAudio = false;
+  if (
+    processing?.normalization &&
+    processing.normalization.mode !== VolumeNormalizationMode.DISABLED
+  ) {
+    stages.push(
+      normalizationStage(
+        processing.normalization,
+        translate,
+        dependencies.locale,
+        sourceName,
+      ),
+    );
+    serverAltersAudio ||= normalizationAppliedByServer(
+      processing.normalization,
+    );
+  }
+  if (processing && processing.playback_speed !== 1) {
+    stages.push({
+      key: "playback-speed",
+      icon: Gauge,
+      title: translate("streamdetails.audio_processing.playback_speed", [
+        formatNumber(processing.playback_speed, 2, dependencies.locale),
+      ]),
+    });
+    serverAltersAudio = true;
+  }
+  const reportedCrossfadeMode = processing?.crossfade_mode;
+  // Keep source attribution and a voice-over the server applied; otherwise show
+  // the queue's current intent.
+  const crossfadeMode =
+    reportedCrossfadeMode === CrossfadeMode.SOURCE ||
+    reportedCrossfadeMode === CrossfadeMode.VOICE_OVER
+      ? reportedCrossfadeMode
+      : (crossfadeIntent ?? reportedCrossfadeMode);
+  serverAltersAudio ||= crossfadeAppliedByServer(reportedCrossfadeMode);
+  if (crossfadeMode && crossfadeMode !== CrossfadeMode.DISABLED) {
+    stages.push({
+      key: "crossfade",
+      icon: CrossfadeIcon,
+      title: translate("streamdetails.audio_processing.crossfade_title"),
+      subtitleParts: [crossfadeModeLabel(crossfadeMode, translate, sourceName)],
+    });
+  }
+  if (processing?.overlay_active) {
+    stages.push({
+      key: "overlay",
+      icon: AudioLines,
+      title: translate("streamdetails.audio_processing.overlay_active"),
+    });
+    serverAltersAudio = true;
+  }
+  if (processing?.pcm_format) {
+    const contextStage = processingContextStage(
+      streamDetails.audio_format,
+      processing.pcm_format,
+      chain,
+      !serverAltersAudio,
+      translate,
+      dependencies.locale,
+    );
+    if (contextStage) stages.unshift(contextStage);
+  }
+  return stages;
+}
+
+function buildOutputDisplay(
+  output: AudioOutputDetails,
+  index: number,
+  dependencies: AudioProcessingDetailsDependencies,
+): AudioProcessingOutputDisplay {
+  const { translate, getPresetName, getIRName } = dependencies;
+  const { dsp, player_ids: playerIds } = output;
+  const stages: AudioProcessingDisplayStage[] = [];
+
+  if (shouldShowDSPState(dsp)) {
+    stages.push({
+      key: `dsp-state-${index}`,
+      icon: SlidersHorizontal,
+      title: dspStateLabel(dsp.state, translate),
+    });
+  }
+  if (dsp.preset_id) {
+    stages.push({
+      key: `dsp-preset-${index}`,
+      icon: SlidersHorizontal,
+      title:
+        getPresetName(dsp.preset_id) ??
+        translate("settings.dsp.presets.custom"),
+      subtitleParts: [
+        translate("streamdetails.audio_processing.dsp_preset_label"),
+      ],
+    });
+  }
+  if (dsp.input_gain) {
+    stages.push({
+      key: `dsp-input-gain-${index}`,
+      icon: Gauge,
+      title: translate("streamdetails.input_gain", [
+        formatNumber(dsp.input_gain, 1, dependencies.locale),
+      ]),
+    });
+  }
+  for (const [filterIndex, filter] of dsp.filters.entries()) {
+    const irName =
+      filter.type === DSPFilterType.CONVOLUTION
+        ? getIRName(filter.ir_id)
+        : undefined;
+    stages.push({
+      key: `dsp-filter-${index}-${filterIndex}`,
+      icon: dspFilterIcon(filter),
+      title: dspFilterText(filter),
+      subtitleParts: irName ? [irName] : undefined,
+    });
+  }
+  if (dsp.output_gain) {
+    stages.push({
+      key: `dsp-output-gain-${index}`,
+      icon: Gauge,
+      title: translate("streamdetails.output_gain", [
+        formatNumber(dsp.output_gain, 1, dependencies.locale),
+      ]),
+    });
+  }
+
+  if (output.source_channel) {
+    // ALL marks the fold-down of both source channels, so there is no single
+    // source channel to name here
+    const mixedToMono = output.source_channel === AudioChannel.ALL;
+    stages.push({
+      key: `source-channel-${index}`,
+      icon: mixedToMono ? Merge : Split,
+      title: mixedToMono
+        ? translate("streamdetails.audio_processing.mixed_to_mono")
+        : translate("streamdetails.audio_processing.source_channel", [
+            sourceChannelLabel(output.source_channel, translate),
+          ]),
+    });
+  }
+  stages.push(finalOutputStage(output, index, translate, dependencies.locale));
+
+  return {
+    key: playerIds.join("|") || `output-${index}`,
+    playerIds,
+    qualityTier: audioQualityToTier(output.fidelity.quality),
+    qualityLabel: audioQualityLabel(output.fidelity.quality, translate),
+    stages,
+    destination: destinationStage(playerIds, dependencies),
+  };
+}
+
+function destinationStage(
+  playerIds: string[],
+  dependencies: AudioProcessingDetailsDependencies,
+): AudioProcessingDisplayStage {
+  if (playerIds.length === 0) {
+    return {
+      key: "destination",
+      icon: Speaker,
+      title: dependencies.translate(
+        "streamdetails.audio_processing.destination_unavailable",
+      ),
+    };
+  }
+  const destinations = resolveDestinations(playerIds, dependencies);
+  const primary = destinations[0];
+  const additionalDestinationCount = destinations.length - 1;
+  const stage = {
+    key: "destination",
+    title:
+      additionalDestinationCount > 0
+        ? `${primary.name} +${additionalDestinationCount}`
+        : primary.name,
+    details:
+      additionalDestinationCount > 0
+        ? destinations.map((destination) => destination.name)
+        : undefined,
+  };
+  const providerIconDomain = commonDestinationProviderDomain(destinations);
+  return providerIconDomain
+    ? { ...stage, providerIconDomain }
+    : { ...stage, icon: Speaker };
+}
+
+interface ResolvedDestination {
+  playerId: string;
+  name: string;
+  providerDomain?: string;
+}
+
+function resolveDestinations(
+  playerIds: string[],
+  dependencies: AudioProcessingDetailsDependencies,
+): ResolvedDestination[] {
+  const destinations: ResolvedDestination[] = [];
+  const seenPlayerIds = new Set<string>();
+  for (const playerId of playerIds) {
+    const resolved = resolveDestination(playerId, dependencies);
+    const resolvedPlayerId = resolved?.player.player_id ?? playerId;
+    if (seenPlayerIds.has(resolvedPlayerId)) continue;
+    seenPlayerIds.add(resolvedPlayerId);
+    destinations.push({
+      playerId: resolvedPlayerId,
+      name: resolved
+        ? dependencies.getPlayerName(resolved.player)
+        : dependencies.translate(
+            "streamdetails.audio_processing.destination_unknown",
+            [playerId],
+          ),
+      providerDomain: resolved?.providerDomain,
+    });
+  }
+  return destinations;
+}
+
+interface DestinationResolution {
+  player: AudioProcessingDisplayPlayer;
+  providerDomain?: string;
+}
+
+function resolveDestination(
+  playerId: string,
+  dependencies: AudioProcessingDetailsDependencies,
+): DestinationResolution | undefined {
+  for (const player of Object.values(dependencies.players)) {
+    if (player.player_id === playerId) continue;
+    const protocol = player.output_protocols.find(
+      (outputProtocol) =>
+        !outputProtocol.is_native &&
+        outputProtocol.output_protocol_id === playerId,
+    );
+    if (!protocol) continue;
+    return {
+      player,
+      providerDomain: protocol.protocol_domain,
+    };
+  }
+
+  const player = dependencies.players[playerId];
+  if (!player) return undefined;
+  const activeProtocolId = player.active_output_protocol;
+  if (
+    !activeProtocolId ||
+    activeProtocolId === "native" ||
+    activeProtocolId === player.player_id
+  ) {
+    return {
+      player,
+      providerDomain: playerProviderDomain(player, dependencies),
+    };
+  }
+
+  const activeProtocol = player.output_protocols.find(
+    (protocol) => protocol.output_protocol_id === activeProtocolId,
+  );
+  return {
+    player,
+    providerDomain: activeProtocol?.protocol_domain,
+  };
+}
+
+function playerProviderDomain(
+  player: AudioProcessingDisplayPlayer | undefined,
+  dependencies: AudioProcessingDetailsDependencies,
+): string | undefined {
+  return player ? dependencies.getProviderDomain(player.provider) : undefined;
+}
+
+function commonDestinationProviderDomain(
+  destinations: ResolvedDestination[],
+): string | undefined {
+  const domain = destinations[0]?.providerDomain;
+  return domain &&
+    destinations.every((destination) => destination.providerDomain === domain)
+    ? domain
+    : undefined;
+}
+
+function normalizationStage(
+  normalization: AudioNormalizationDetails,
+  translate: Translate,
+  locale: string,
+  sourceName: string,
+): AudioProcessingDisplayStage {
+  // the source names neither a target nor a measurement, so it has no details to show
+  const details: string[] =
+    normalization.mode === VolumeNormalizationMode.SOURCE
+      ? []
+      : [
+          translate("streamdetails.audio_processing.measurement_source", [
+            measurementSourceLabel(normalization.measurement_source, translate),
+          ]),
+        ];
+  addDetail(
+    details,
+    "streamdetails.audio_processing.target_lufs",
+    normalization.target_lufs,
+    translate,
+    locale,
+  );
+  addDetail(
+    details,
+    "streamdetails.audio_processing.measured_lufs",
+    normalization.measured_lufs,
+    translate,
+    locale,
+  );
+  addDetail(
+    details,
+    "streamdetails.audio_processing.applied_gain_db",
+    normalization.applied_gain_db,
+    translate,
+    locale,
+  );
+  return {
+    key: "normalization",
+    icon: AudioLines,
+    title: translate("streamdetails.audio_processing.normalization_title"),
+    subtitleParts: [
+      normalizationModeLabel(normalization.mode, translate, sourceName),
+    ],
+    details,
+  };
+}
+
+function processingContextStage(
+  sourceFormat: AudioFormat,
+  internalFormat: AudioFormat,
+  chain: AudioProcessingChain,
+  sharedPathIsDirect: boolean,
+  translate: Translate,
+  locale: string,
+): AudioProcessingDisplayStage | undefined {
+  const internalCodec = audioFormatCodec(internalFormat);
+  const internalFormatDetail = translate(
+    "streamdetails.audio_processing.internal_format_detail",
+    [internalFormatSummary(internalFormat, translate, locale)],
+  );
+
+  if (
+    FLOAT_PCM_CONTENT_TYPES.has(internalCodec) &&
+    !FLOAT_PCM_CONTENT_TYPES.has(audioFormatCodec(sourceFormat))
+  ) {
+    const details = [
+      translate("streamdetails.audio_processing.processing_headroom_detail"),
+      internalFormatDetail,
+    ];
+    const reasons = processingHeadroomReasons(chain, translate);
+    if (reasons.length > 0) {
+      details.push(
+        translate(
+          "streamdetails.audio_processing.processing_headroom_reasons",
+          [reasons.join(", ")],
+        ),
+      );
+    }
+    return {
+      key: "pcm-format",
+      icon: Gauge,
+      title: translate("streamdetails.audio_processing.processing_headroom"),
+      subtitleParts: [contentTypeLabel(internalCodec, translate)],
+      atomicSubtitleParts: true,
+      details,
+    };
+  }
+
+  if (
+    sharedPathIsDirect &&
+    !hasMeaningfulInternalConversion(sourceFormat, internalFormat)
+  ) {
+    if (!allOutputsAreBitPerfect(chain)) {
+      return {
+        key: "pcm-format",
+        icon: FileAudio,
+        title: translate("streamdetails.audio_processing.no_shared_transforms"),
+        details: [
+          translate(
+            "streamdetails.audio_processing.no_shared_transforms_detail",
+          ),
+          internalFormatDetail,
+        ],
+      };
+    }
+    return {
+      key: "pcm-format",
+      icon: FileAudio,
+      title: translate("streamdetails.audio_processing.direct_signal_path"),
+      details: [
+        translate("streamdetails.audio_processing.direct_signal_path_detail"),
+        internalFormatDetail,
+        translate(
+          "streamdetails.audio_processing.direct_signal_path_inactive_detail",
+        ),
+      ],
+    };
+  }
+
+  if (hasMeaningfulInternalConversion(sourceFormat, internalFormat)) {
+    return {
+      key: "pcm-format",
+      icon: FileAudio,
+      title: translate(
+        "streamdetails.audio_processing.internal_format_conversion",
+      ),
+      subtitleParts: [internalFormatPrimaryLabel(internalFormat, translate)],
+      atomicSubtitleParts: true,
+      details: [
+        translate(
+          "streamdetails.audio_processing.internal_format_conversion_detail",
+        ),
+        internalFormatDetail,
+      ],
+    };
+  }
+  return undefined;
+}
+
+function allOutputsAreBitPerfect(chain: AudioProcessingChain): boolean {
+  return Boolean(
+    chain.outputs.length &&
+    chain.outputs.every((output) => output.fidelity.bit_perfect === true),
+  );
+}
+
+function finalOutputStage(
+  output: AudioOutputDetails,
+  index: number,
+  translate: Translate,
+  locale: string,
+): AudioProcessingDisplayStage {
+  const format = output.output_format;
+  const details = format ? audioFormatDetails(format, translate, locale) : [];
+  details.push(
+    outputFidelityDetail(
+      output.fidelity.bit_perfect,
+      output.output_format,
+      translate,
+    ),
+  );
+  return {
+    key: `output-format-${index}`,
+    icon: FileIcon,
+    title: format
+      ? audioFormatTitle(format, translate)
+      : translate("streamdetails.audio_processing.unknown_format"),
+    subtitleParts: format
+      ? audioFormatTechnicalParts(format, translate, locale)
+      : undefined,
+    atomicSubtitleParts: true,
+    badge:
+      output.fidelity.bit_perfect === true
+        ? translate("streamdetails.audio_processing.bit_perfect_badge")
+        : undefined,
+    details,
+  };
+}
+
+function formatStage(
+  key: string,
+  format: AudioFormat,
+  translate: Translate,
+  locale: string,
+): AudioProcessingDisplayStage {
+  return {
+    key,
+    icon: FileIcon,
+    title: audioFormatTitle(format, translate),
+    subtitleParts: audioFormatTechnicalParts(format, translate, locale),
+    atomicSubtitleParts: true,
+    details: audioFormatDetails(format, translate, locale),
+  };
+}
+
+function outputFidelityDetail(
+  bitPerfect: boolean | null,
+  format: AudioFormat | null,
+  translate: Translate,
+): string {
+  if (bitPerfect === true) {
+    return translate("streamdetails.audio_processing.bit_perfect_detail");
+  }
+  if (bitPerfect === false) {
+    if (format && LOSSY_AUDIO_CODECS.has(audioFormatCodec(format))) {
+      return translate("streamdetails.audio_processing.lossy_output_detail");
+    }
+    return translate("streamdetails.audio_processing.samples_changed_detail");
+  }
+  return translate("streamdetails.audio_processing.bit_perfect_unknown_detail");
+}
+
+function shouldShowDSPState(dsp: AudioDSPDetails): boolean {
+  return dsp.state !== DSPState.DISABLED || hasDSPConfiguration(dsp);
+}
+
+function hasDSPConfiguration(dsp: AudioDSPDetails): boolean {
+  return Boolean(
+    dsp.preset_id || dsp.input_gain || dsp.output_gain || dsp.filters.length,
+  );
+}
+
+function hasActiveDSPTransform(dsp: AudioDSPDetails): boolean {
+  return Boolean(
+    dsp.state === DSPState.ENABLED &&
+    (dsp.preset_id ||
+      dsp.input_gain ||
+      dsp.output_gain ||
+      dsp.filters.some((filter) => filter.enabled !== false)),
+  );
+}
+
+function processingHeadroomReasons(
+  chain: AudioProcessingChain,
+  translate: Translate,
+): string[] {
+  const reasons = new Set<string>();
+  const processing = chain.queue_processing;
+  if (normalizationAppliedByServer(processing?.normalization)) {
+    reasons.add(
+      translate("streamdetails.audio_processing.normalization_title"),
+    );
+  }
+  if (processing && processing.playback_speed !== 1) {
+    reasons.add(
+      translate("streamdetails.audio_processing.playback_speed_title"),
+    );
+  }
+  if (crossfadeAppliedByServer(processing?.crossfade_mode)) {
+    reasons.add(translate("streamdetails.audio_processing.crossfade_title"));
+  }
+  if (processing?.overlay_active) {
+    reasons.add(translate("streamdetails.audio_processing.overlay_title"));
+  }
+  for (const output of chain.outputs) {
+    if (hasActiveDSPTransform(output.dsp)) {
+      reasons.add(translate("streamdetails.audio_processing.dsp_title"));
+    }
+  }
+  return [...reasons];
+}
+
+/**
+ * Whether the server itself corrected the level, rather than the source.
+ *
+ * A step the source performed is reported for context, but the server applied
+ * nothing: it neither reserved headroom for it nor altered the samples.
+ */
+function normalizationAppliedByServer(
+  normalization: AudioNormalizationDetails | null | undefined,
+): boolean {
+  return (
+    !!normalization &&
+    normalization.mode !== VolumeNormalizationMode.DISABLED &&
+    normalization.mode !== VolumeNormalizationMode.SOURCE
+  );
+}
+
+/**
+ * Whether the server itself mixed the overlap, rather than the source.
+ */
+function crossfadeAppliedByServer(mode: CrossfadeMode | undefined): boolean {
+  return (
+    mode !== undefined &&
+    mode !== CrossfadeMode.DISABLED &&
+    mode !== CrossfadeMode.SOURCE
+  );
+}
+
+function addDetail(
+  details: string[],
+  key: string,
+  value: number | null | undefined,
+  translate: Translate,
+  locale: string,
+): void {
+  if (typeof value === "number") {
+    details.push(translate(key, [formatNumber(value, 2, locale)]));
+  }
+}
+
+function audioFormatTitle(format: AudioFormat, translate: Translate): string {
+  return contentTypeLabel(audioFormatCodec(format), translate);
+}
+
+function audioFormatTechnicalParts(
+  format: AudioFormat,
+  translate: Translate,
+  locale: string,
+): string[] {
+  const codec = audioFormatCodec(format);
+  const parts: string[] = [];
+  if (format.sample_rate > 0) {
+    parts.push(
+      translate("streamdetails.audio_processing.sample_rate", [
+        formatNumber(format.sample_rate / 1000, 1, locale),
+      ]),
+    );
+  }
+  if (format.bit_depth > 0 && !FLOAT_PCM_CONTENT_TYPES.has(codec)) {
+    parts.push(
+      translate("streamdetails.audio_processing.bit_depth", [format.bit_depth]),
+    );
+  }
+  if (format.channels > 0) {
+    parts.push(audioChannelCountLabel(format.channels, translate));
+  }
+  if (format.bit_rate > 0 && !PCM_CONTENT_TYPES.has(codec)) {
+    parts.push(
+      translate("streamdetails.audio_processing.bit_rate", [
+        formatNumber(format.bit_rate, 1, locale),
+      ]),
+    );
+  }
+  return parts;
+}
+
+function internalFormatPrimaryLabel(
+  format: AudioFormat,
+  translate: Translate,
+): string {
+  const codec = audioFormatCodec(format);
+  if (
+    PCM_CONTENT_TYPES.has(codec) &&
+    !FLOAT_PCM_CONTENT_TYPES.has(codec) &&
+    format.bit_depth > 0
+  ) {
+    return translate("streamdetails.audio_processing.integer_pcm", [
+      format.bit_depth,
+    ]);
+  }
+  return contentTypeLabel(codec, translate);
+}
+
+function internalFormatSummary(
+  format: AudioFormat,
+  translate: Translate,
+  locale: string,
+): string {
+  const codec = audioFormatCodec(format);
+  const parts = [internalFormatPrimaryLabel(format, translate)];
+  if (!PCM_CONTENT_TYPES.has(codec) && format.bit_depth > 0) {
+    parts.push(
+      translate("streamdetails.audio_processing.bit_depth", [format.bit_depth]),
+    );
+  }
+  if (format.sample_rate > 0) {
+    parts.push(
+      translate("streamdetails.audio_processing.sample_rate", [
+        formatNumber(format.sample_rate / 1000, 1, locale),
+      ]),
+    );
+  }
+  if (format.channels > 0) {
+    parts.push(audioChannelCountLabel(format.channels, translate));
+  }
+  return parts.join(" · ");
+}
+
+function hasMeaningfulInternalConversion(
+  sourceFormat: AudioFormat,
+  internalFormat: AudioFormat,
+): boolean {
+  if (
+    formatValueDiffers(sourceFormat.sample_rate, internalFormat.sample_rate) ||
+    internalNarrowsBitDepth(sourceFormat, internalFormat) ||
+    formatValueDiffers(sourceFormat.channels, internalFormat.channels)
+  ) {
+    return true;
+  }
+  const sourceCodec = audioFormatCodec(sourceFormat);
+  const internalCodec = audioFormatCodec(internalFormat);
+  return (
+    PCM_CONTENT_TYPES.has(sourceCodec) &&
+    PCM_CONTENT_TYPES.has(internalCodec) &&
+    sourceCodec !== internalCodec
+  );
+}
+
+function formatValueDiffers(
+  sourceValue: number,
+  internalValue: number,
+): boolean {
+  return sourceValue > 0 && internalValue > 0 && sourceValue !== internalValue;
+}
+
+// a wider internal container carries the source samples untouched: it is either
+// processing headroom or a provider that decoded upstream and handed over PCM
+// wider than the tier it advertises. Only narrowing drops bits.
+function internalNarrowsBitDepth(
+  sourceFormat: AudioFormat,
+  internalFormat: AudioFormat,
+): boolean {
+  return (
+    sourceFormat.bit_depth > 0 &&
+    internalFormat.bit_depth > 0 &&
+    internalFormat.bit_depth < sourceFormat.bit_depth
+  );
+}
+
+function audioFormatCodec(format: AudioFormat): string {
+  return format.codec_type && format.codec_type !== ContentType.UNKNOWN
+    ? format.codec_type
+    : format.content_type;
+}
+
+function audioChannelCountLabel(
+  channels: number,
+  translate: Translate,
+): string {
+  if (channels === 1) {
+    return translate("streamdetails.audio_processing.mono");
+  }
+  if (channels === 2) {
+    return translate("streamdetails.audio_processing.stereo");
+  }
+  return translate("streamdetails.audio_processing.channel_count", [channels]);
+}
+
+function audioFormatDetails(
+  format: AudioFormat,
+  translate: Translate,
+  locale: string,
+): string[] {
+  const details = [
+    translate("streamdetails.file_info.container", [
+      contentTypeLabel(format.content_type, translate),
+    ]),
+  ];
+  if (format.codec_type && format.codec_type !== ContentType.UNKNOWN) {
+    details.push(
+      translate("streamdetails.file_info.codec", [
+        contentTypeLabel(format.codec_type, translate),
+      ]),
+    );
+  }
+  if (format.bit_depth > 0) {
+    details.push(
+      translate("streamdetails.file_info.bit_depth", [format.bit_depth]),
+    );
+  }
+  if (format.sample_rate > 0) {
+    details.push(
+      translate("streamdetails.file_info.sample_rate", [
+        formatNumber(format.sample_rate / 1000, 1, locale),
+      ]),
+    );
+  }
+  if (format.channels > 0) {
+    details.push(
+      translate("streamdetails.file_info.channels", [format.channels]),
+    );
+  }
+  if (format.bit_rate > 0) {
+    details.push(
+      translate("streamdetails.file_info.bit_rate", [
+        formatNumber(format.bit_rate, 1, locale),
+      ]),
+    );
+  }
+  return details;
+}
+
+function contentTypeLabel(
+  contentType: string | undefined,
+  translate: Translate,
+): string {
+  if (
+    !contentType ||
+    contentType === ContentType.UNKNOWN ||
+    !KNOWN_CONTENT_TYPES.has(contentType)
+  ) {
+    return translate("streamdetails.audio_processing.unknown_format");
+  }
+  if (contentType === ContentType.PCM_F32LE) {
+    return translate("streamdetails.audio_processing.float_pcm_32");
+  }
+  if (contentType === ContentType.PCM_F64LE) {
+    return translate("streamdetails.audio_processing.float_pcm_64");
+  }
+  if (PCM_CONTENT_TYPES.has(contentType)) {
+    return translate("streamdetails.audio_processing.pcm");
+  }
+  return contentType.toUpperCase();
+}
+
+function audioQualityLabel(
+  quality: string | undefined,
+  translate: Translate,
+): string {
+  switch (quality) {
+    case AudioQuality.LOW:
+      return translate("streamdetails.audio_processing.quality.low");
+    case AudioQuality.STANDARD:
+      return translate("streamdetails.audio_processing.quality.standard");
+    case AudioQuality.LOSSLESS:
+      return translate("streamdetails.audio_processing.quality.lossless");
+    case AudioQuality.HI_RES:
+      return translate("streamdetails.audio_processing.quality.hi_res");
+    default:
+      return translate("streamdetails.audio_processing.quality.unknown");
+  }
+}
+
+function normalizationModeLabel(
+  mode: string | undefined,
+  translate: Translate,
+  sourceName: string,
+): string {
+  switch (mode) {
+    case VolumeNormalizationMode.DISABLED:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.disabled",
+      );
+    case VolumeNormalizationMode.DYNAMIC:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.dynamic",
+      );
+    case VolumeNormalizationMode.MEASUREMENT_ONLY:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.measurement_only",
+      );
+    case VolumeNormalizationMode.FALLBACK_FIXED_GAIN:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.fallback_fixed_gain",
+      );
+    case VolumeNormalizationMode.FIXED_GAIN:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.fixed_gain",
+      );
+    case VolumeNormalizationMode.FALLBACK_DYNAMIC:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.fallback_dynamic",
+      );
+    case VolumeNormalizationMode.SOURCE:
+      return translate(
+        "streamdetails.audio_processing.normalization_mode.source",
+        [sourceName],
+      );
+    default:
+      return translate("streamdetails.audio_processing.unknown");
+  }
+}
+
+function measurementSourceLabel(
+  source: string | undefined,
+  translate: Translate,
+): string {
+  const knownSources = ["track", "album", "live", "fallback"];
+  if (!source || !knownSources.includes(source)) {
+    return translate("streamdetails.audio_processing.unknown");
+  }
+  return translate(`streamdetails.audio_processing.measurement.${source}`);
+}
+
+function crossfadeModeLabel(
+  mode: string,
+  translate: Translate,
+  sourceName: string,
+): string {
+  switch (mode) {
+    case CrossfadeMode.SMART_CROSSFADE:
+      return translate("streamdetails.audio_processing.crossfade_mode.smart");
+    case CrossfadeMode.STANDARD_CROSSFADE:
+      return translate(
+        "streamdetails.audio_processing.crossfade_mode.standard",
+      );
+    case CrossfadeMode.VOICE_OVER:
+      return translate(
+        "streamdetails.audio_processing.crossfade_mode.voice_over",
+      );
+    case CrossfadeMode.DISABLED:
+      return translate(
+        "streamdetails.audio_processing.crossfade_mode.disabled",
+      );
+    case CrossfadeMode.SOURCE:
+      return translate("streamdetails.audio_processing.crossfade_mode.source", [
+        sourceName,
+      ]);
+    default:
+      return translate("streamdetails.audio_processing.unknown");
+  }
+}
+
+function dspStateLabel(
+  state: string | undefined,
+  translate: Translate,
+): string {
+  switch (state) {
+    case DSPState.ENABLED:
+      return translate("streamdetails.audio_processing.dsp_state.enabled");
+    case DSPState.DISABLED:
+      return translate("streamdetails.audio_processing.dsp_state.disabled");
+    case DSPState.DISABLED_BY_UNSUPPORTED_GROUP:
+      return translate(
+        "streamdetails.audio_processing.dsp_state.disabled_by_unsupported_group",
+      );
+    default:
+      return translate("streamdetails.audio_processing.dsp_state.unknown");
+  }
+}
+
+function sourceChannelLabel(channel: string, translate: Translate): string {
+  switch (channel) {
+    case AudioChannel.FL:
+      return translate("streamdetails.audio_processing.source_channel_left");
+    case AudioChannel.FR:
+      return translate("streamdetails.audio_processing.source_channel_right");
+    default:
+      return translate("streamdetails.audio_processing.unknown");
+  }
+}
+
+function formatNumber(
+  value: number,
+  maximumFractionDigits: number,
+  locale: string,
+): string {
+  return new Intl.NumberFormat(locale.replaceAll("_", "-"), {
+    maximumFractionDigits,
+  }).format(value);
+}

@@ -1,0 +1,26 @@
+{
+  "config_entries": {
+    "quality": {
+      "label": "Stream quality",
+      "description": "Preferred streaming quality. Lossless needs a nugs.net plan that includes HiFi streaming; lossy is used otherwise, or when a show isn't available in lossless.",
+      "options": {
+        "lossless": "Lossless",
+        "lossy": "Lossy"
+      },
+      "option_descriptions": {
+        "lossless": "CD quality or better.",
+        "lossy": "Compressed stream, uses less bandwidth."
+      }
+    }
+  },
+  "media": {
+    "recommendations": {
+      "nugs_popular_shows": { "name": "Most Popular" },
+      "nugs_recommended_shows": { "name": "Recommended Shows" },
+      "nugs_recent_shows": { "name": "Recent Shows" }
+    }
+  },
+  "manifest": {
+    "description": "Stream official live concert audio & video — new shows added regularly to a rich archive."
+  }
+}

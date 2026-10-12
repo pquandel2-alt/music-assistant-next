@@ -1,0 +1,54 @@
+<script setup lang="ts" generic="TData">
+import { Settings2 } from "@lucide/vue";
+import type { Table } from "@tanstack/vue-table";
+import { computed } from "vue";
+
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
+const props = defineProps<{
+  table: Table<TData>;
+}>();
+
+const columns = computed(() =>
+  props.table
+    .getAllColumns()
+    .filter(
+      (column) =>
+        typeof column.accessorFn !== "undefined" && column.getCanHide(),
+    ),
+);
+</script>
+
+<template>
+  <DropdownMenu>
+    <DropdownMenuTrigger as-child>
+      <Button variant="outline" size="sm" class="ml-auto hidden h-8 lg:flex">
+        <Settings2 class="mr-2 size-4" />
+        {{ $t("data_table.view") }}
+      </Button>
+    </DropdownMenuTrigger>
+    <DropdownMenuContent align="end" class="w-[150px]">
+      <DropdownMenuLabel>{{
+        $t("data_table.toggle_columns")
+      }}</DropdownMenuLabel>
+      <DropdownMenuSeparator />
+      <DropdownMenuCheckboxItem
+        v-for="column in columns"
+        :key="column.id"
+        class="capitalize"
+        :model-value="column.getIsVisible()"
+        @update:model-value="(value) => column.toggleVisibility(!!value)"
+      >
+        {{ column.id }}
+      </DropdownMenuCheckboxItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
+</template>

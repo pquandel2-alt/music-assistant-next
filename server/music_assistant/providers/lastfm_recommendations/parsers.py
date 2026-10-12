@@ -1,0 +1,469 @@
+"""Parsers to convert Last.fm API responses to Music Assistant media items."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Any, cast
+
+import aiohttp
+from music_assistant_models.enums import (
+    ExternalID,
+    MediaType,
+    ProviderFeature,
+    ProviderStatus,
+    ProviderType,
+)
+from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
+from music_assistant_models.media_items import Album, Artist, ItemMapping, Track
+
+from music_assistant.constants import MASS_LOGGER_NAME
+from music_assistant.controllers.music.helpers import provider_mappings_from_urls
+from music_assistant.helpers.compare import compare_strings
+from music_assistant.providers.lastfm_recommendations.constants import (
+    PROVIDER_SEARCH_LIMIT,
+    SEARCH_CONCURRENCY_LIMIT,
+)
+from music_assistant.providers.musicbrainz.provider import relation_urls
+
+if TYPE_CHECKING:
+    from music_assistant import MusicAssistant
+    from music_assistant.controllers.music.media.albums import AlbumsController
+    from music_assistant.controllers.music.media.artists import ArtistsController
+    from music_assistant.controllers.music.media.tracks import TracksController
+    from music_assistant.providers.musicbrainz.models import (
+        MusicBrainzArtist,
+        MusicBrainzRecording,
+        MusicBrainzRelease,
+    )
+    from music_assistant.providers.musicbrainz.provider import MusicbrainzProvider
+
+LOGGER = logging.getLogger(f"{MASS_LOGGER_NAME}.lastfm_recommendations")
+
+# Limit concurrent provider searches and item fetches to avoid overwhelming their APIs.
+_SEARCH_SEMAPHORE = asyncio.Semaphore(SEARCH_CONCURRENCY_LIMIT)
+
+
+class SearchIncomplete(Exception):
+    """Raised when an item could not be resolved because not every provider could be searched."""
+
+
+def _is_matching_result(
+    item_mapping: ItemMapping, result: Artist | Album | Track, artist_name: str | None
+) -> bool:
+    """
+    Return True if a search result matches the searched item by name (and artist, if known).
+
+    :param item_mapping: ItemMapping that was searched for.
+    :param result: Search result to verify.
+    :param artist_name: Artist name to verify against the result's artists, if known.
+    """
+    # Album/track search names are "Artist - Title" while results usually expose only the title.
+    searched_name = item_mapping.name
+    title_part = (
+        searched_name[len(artist_name) + 3 :]
+        if artist_name and searched_name.startswith(f"{artist_name} - ")
+        else searched_name
+    )
+    if not compare_strings(title_part, result.name, strict=False) and not compare_strings(
+        searched_name, result.name, strict=False
+    ):
+        return False
+
+    # Verify the artist too: a matching title from a different artist (cover or karaoke
+    # version) must not pass. Results without artist info can't contradict, accept those.
+    result_artists = getattr(result, "artists", None)
+    if artist_name and result_artists:
+        return any(
+            compare_strings(artist_name, result_artist.name, strict=False)
+            for result_artist in result_artists
+        )
+    return True
+
+
+def _get_streaming_providers(
+    mass: MusicAssistant, item_mapping: ItemMapping, provider_instance_to_skip: str
+) -> list[Any]:
+    """
+    Return streaming providers that support the ItemMapping's media type.
+
+    :param mass: MusicAssistant instance.
+    :param item_mapping: ItemMapping with the media type to search for.
+    :param provider_instance_to_skip: Provider instance to skip (ourselves).
+    """
+    streaming_providers = []
+    for p in mass.music.providers:
+        if p.instance_id == provider_instance_to_skip:
+            continue
+        if not p.is_streaming_provider:
+            continue
+
+        if item_mapping.media_type == MediaType.ARTIST:
+            if ProviderFeature.LIBRARY_ARTISTS not in p.supported_features:
+                continue
+        elif item_mapping.media_type == MediaType.ALBUM:
+            if ProviderFeature.LIBRARY_ALBUMS not in p.supported_features:
+                continue
+        elif item_mapping.media_type == MediaType.TRACK:
+            if ProviderFeature.LIBRARY_TRACKS not in p.supported_features:
+                continue
+
+        streaming_providers.append(p)
+    return streaming_providers
+
+
+async def _search_provider(
+    ctrl: ArtistsController | AlbumsController | TracksController,
+    item_mapping: ItemMapping,
+    provider: Any,
+) -> list[Artist | Album | Track] | None:
+    """
+    Search a single provider for candidates of an item.
+
+    :param ctrl: Controller for the media type.
+    :param item_mapping: ItemMapping to search for.
+    :param provider: Provider instance to search.
+    :returns: The candidates, or None when the provider could not be searched (e.g. it is
+        rate limited or unavailable).
+    """
+    async with _SEARCH_SEMAPHORE:
+        # the controller answers an unavailable provider with no results, which would read
+        # as the provider not having the item; it can unload while waiting here or searching
+        if not provider.available:
+            return None
+        try:
+            LOGGER.debug(
+                "Searching %s on %s for: %s",
+                item_mapping.media_type.value,
+                provider.name,
+                item_mapping.name,
+            )
+            # Use a higher limit to work around provider bugs (e.g. Spotify misbehaves at limit=1).
+            search_results = await ctrl.search(
+                item_mapping.name, provider.instance_id, limit=PROVIDER_SEARCH_LIMIT
+            )
+            if not provider.available:
+                return None
+            return list(search_results)
+        except MusicAssistantError as err:
+            LOGGER.debug("Provider %s search failed: %s", provider.name, type(err).__name__)
+            return None
+
+
+async def _search_providers(
+    ctrl: ArtistsController | AlbumsController | TracksController,
+    item_mapping: ItemMapping,
+    providers: list[Any],
+    artist_name: str | None,
+) -> Artist | Album | Track | None:
+    """
+    Search the providers one by one and return the first verified match.
+
+    :param ctrl: Controller for the media type.
+    :param item_mapping: ItemMapping to search for.
+    :param providers: Providers to search, in order of preference.
+    :param artist_name: Artist name to verify candidate matches against, if known.
+    :raises SearchIncomplete: When nothing matched and at least one provider search failed.
+    """
+    search_failed = False
+    # each search is a request to a rate limited music service,
+    # so a hit on an earlier provider must spare the later ones
+    for provider in providers:
+        candidates = await _search_provider(ctrl, item_mapping, provider)
+        if candidates is None:
+            search_failed = True
+            continue
+        for result in candidates:
+            if not _is_matching_result(item_mapping, result, artist_name):
+                LOGGER.debug(
+                    "Rejecting %s from %s: name mismatch (searched: %s)",
+                    result.name,
+                    result.provider,
+                    item_mapping.name,
+                )
+                continue
+            LOGGER.debug(
+                "Match on %s: %s (searched: %s)",
+                result.provider,
+                result.name,
+                item_mapping.name,
+            )
+            return result
+
+    if search_failed:
+        raise SearchIncomplete(item_mapping.name)
+    return None
+
+
+async def _resolve_item(
+    item_mapping: ItemMapping,
+    mass: MusicAssistant,
+    provider_instance_to_skip: str,
+    artist_name: str | None = None,
+) -> Artist | Album | Track | None:
+    """
+    Resolve an ItemMapping to a library or provider item.
+
+    :param item_mapping: ItemMapping with metadata and external IDs from Last.fm.
+    :param mass: MusicAssistant instance.
+    :param provider_instance_to_skip: Provider instance to skip (ourselves).
+    :param artist_name: Artist name to verify candidate matches against, if known.
+    :raises SearchIncomplete: When the item may exist but not every provider could be searched.
+    """
+    ctrl: ArtistsController | AlbumsController | TracksController
+    if item_mapping.media_type == MediaType.ARTIST:
+        ctrl = mass.music.artists
+    elif item_mapping.media_type == MediaType.ALBUM:
+        ctrl = mass.music.albums
+    elif item_mapping.media_type == MediaType.TRACK:
+        ctrl = mass.music.tracks
+    else:
+        return None
+
+    LOGGER.debug(
+        "Resolving %s: %s (external IDs: %s)",
+        item_mapping.media_type.value,
+        item_mapping.name,
+        item_mapping.external_ids or "none",
+    )
+
+    if library_item := await ctrl.get_library_item_by_external_ids(item_mapping.external_ids):
+        LOGGER.debug("Found %s in library: %s", item_mapping.media_type.value, library_item.name)
+        return library_item
+
+    # taken before the providers to search are picked: one that finishes loading during the
+    # searches was not searched, so its finishing must not turn a no-match into a miss
+    providers_loading = await _music_providers_loading(mass)
+    streaming_providers = _get_streaming_providers(mass, item_mapping, provider_instance_to_skip)
+    if not streaming_providers:
+        # providers may still be loading, so this says nothing about the item itself
+        LOGGER.debug("No streaming providers available for resolution")
+        raise SearchIncomplete(item_mapping.name)
+
+    result, fetch_failed = await _resolve_via_musicbrainz(
+        ctrl, item_mapping, mass, streaming_providers, artist_name
+    )
+    if result is None:
+        result = await _search_providers(ctrl, item_mapping, streaming_providers, artist_name)
+    if result is None:
+        if providers_loading or fetch_failed:
+            # a provider that had not finished loading, or one that could not hand over
+            # the item MusicBrainz links it to, may still have it
+            raise SearchIncomplete(item_mapping.name)
+        LOGGER.debug("Could not resolve %s: %s", item_mapping.media_type.value, item_mapping.name)
+        return None
+
+    # Streaming providers expose ISRCs (and sometimes MBIDs) that Last.fm doesn't always
+    # provide; re-check the library against the resolved item's external IDs so we prefer
+    # the user's own copy when it exists.
+    if result.external_ids:
+        if library_item := await ctrl.get_library_item_by_external_ids(result.external_ids):
+            LOGGER.debug(
+                "Found %s in library via resolved external IDs: %s",
+                item_mapping.media_type.value,
+                library_item.name,
+            )
+            return library_item
+
+    return result
+
+
+async def parse_artist(
+    lastfm_artist: dict[str, Any], mass: MusicAssistant, provider_instance: str
+) -> Artist | None:
+    """
+    Parse a Last.fm artist and resolve it to a library or provider Artist.
+
+    :param lastfm_artist: Raw Last.fm artist dict with 'name' and 'mbid' fields.
+    :param mass: MusicAssistant instance for accessing library and providers.
+    :param provider_instance: Provider instance ID to skip when searching.
+    :raises SearchIncomplete: When the artist may exist but not every provider could be searched.
+    """
+    name = lastfm_artist.get("name", "Unknown Artist")
+    mbid = lastfm_artist.get("mbid")
+
+    external_ids = set()
+    if mbid:
+        external_ids.add((ExternalID.MB_ARTIST, mbid))
+
+    item_mapping = ItemMapping(
+        media_type=MediaType.ARTIST,
+        item_id="temp",
+        provider="lastfm_recommendations",
+        name=name,
+        external_ids=external_ids,
+    )
+
+    return cast("Artist | None", await _resolve_item(item_mapping, mass, provider_instance))
+
+
+async def parse_track(
+    lastfm_track: dict[str, Any],
+    mass: MusicAssistant,
+    provider_instance: str,
+) -> Track | None:
+    """
+    Parse a Last.fm track and resolve it to a library or provider Track.
+
+    :param lastfm_track: Raw Last.fm track dict with 'name', 'artist', 'mbid', 'duration'.
+    :param mass: MusicAssistant instance for accessing library and providers.
+    :param provider_instance: Provider instance ID to skip when searching.
+    :raises SearchIncomplete: When the track may exist but not every provider could be searched.
+    """
+    name = lastfm_track.get("name", "Unknown Track")
+    mbid = lastfm_track.get("mbid")
+
+    artist_data = lastfm_track.get("artist", {})
+    if isinstance(artist_data, str):
+        artist_name = artist_data
+    else:
+        artist_name = artist_data.get("name", "Unknown Artist")
+
+    external_ids = set()
+    if mbid:
+        external_ids.add((ExternalID.MB_RECORDING, mbid))
+
+    item_mapping = ItemMapping(
+        media_type=MediaType.TRACK,
+        item_id="temp",
+        provider="lastfm_recommendations",
+        name=f"{artist_name} - {name}",
+        external_ids=external_ids,
+    )
+
+    return cast(
+        "Track | None", await _resolve_item(item_mapping, mass, provider_instance, artist_name)
+    )
+
+
+async def parse_album(
+    lastfm_album: dict[str, Any], mass: MusicAssistant, provider_instance: str
+) -> Album | None:
+    """
+    Parse a Last.fm album and resolve it to a library or provider Album.
+
+    :param lastfm_album: Raw Last.fm album dict with 'name', 'artist', 'mbid'.
+    :param mass: MusicAssistant instance for accessing library and providers.
+    :param provider_instance: Provider instance ID to skip when searching.
+    :raises SearchIncomplete: When the album may exist but not every provider could be searched.
+    """
+    name = lastfm_album.get("name", "Unknown Album")
+    mbid = lastfm_album.get("mbid")
+
+    artist_data = lastfm_album.get("artist", {})
+    if isinstance(artist_data, str):
+        artist_name = artist_data
+    else:
+        artist_name = artist_data.get("name", "Unknown Artist")
+
+    external_ids = set()
+    if mbid:
+        external_ids.add((ExternalID.MB_ALBUM, mbid))
+
+    item_mapping = ItemMapping(
+        media_type=MediaType.ALBUM,
+        item_id="temp",
+        provider="lastfm_recommendations",
+        name=f"{artist_name} - {name}",
+        external_ids=external_ids,
+    )
+
+    return cast(
+        "Album | None", await _resolve_item(item_mapping, mass, provider_instance, artist_name)
+    )
+
+
+async def _music_providers_loading(mass: MusicAssistant) -> bool:
+    """
+    Return True while an enabled music provider has not finished loading.
+
+    :param mass: MusicAssistant instance.
+    """
+    return any(
+        conf.status == ProviderStatus.LOADING
+        for conf in await mass.config.get_provider_configs(provider_type=ProviderType.MUSIC)
+    )
+
+
+async def _resolve_via_musicbrainz(
+    ctrl: ArtistsController | AlbumsController | TracksController,
+    item_mapping: ItemMapping,
+    mass: MusicAssistant,
+    providers: list[Any],
+    artist_name: str | None,
+) -> tuple[Artist | Album | Track | None, bool]:
+    """
+    Resolve an item through the streaming service links MusicBrainz holds for its MBID.
+
+    :param ctrl: Controller for the media type.
+    :param item_mapping: ItemMapping to resolve, carrying a MusicBrainz id if Last.fm had one.
+    :param mass: MusicAssistant instance.
+    :param providers: Streaming providers to resolve on, in order of preference.
+    :param artist_name: Artist name to verify the linked item against, if known.
+    :returns: The verified item (None when MusicBrainz could not settle it, which says
+        nothing about whether a provider has it), and whether the linked provider could
+        not hand the item over, so a miss elsewhere is inconclusive.
+    """
+    mbid = item_mapping.mbid
+    musicbrainz = cast("MusicbrainzProvider | None", mass.get_provider("musicbrainz"))
+    if not mbid or musicbrainz is None:
+        return None, False
+    entity: MusicBrainzArtist | MusicBrainzRelease | MusicBrainzRecording
+    try:
+        if item_mapping.media_type == MediaType.ARTIST:
+            entity = await musicbrainz.get_artist_details(mbid)
+        elif item_mapping.media_type == MediaType.ALBUM:
+            entity = await musicbrainz.get_release_details(mbid)
+        else:
+            entity = await musicbrainz.get_recording_details(mbid)
+    except (MusicAssistantError, aiohttp.ClientError, TimeoutError) as err:
+        LOGGER.debug("MusicBrainz lookup of %s failed: %s", item_mapping.name, type(err).__name__)
+        return None, False
+
+    mappings = await provider_mappings_from_urls(
+        mass, relation_urls(entity.relations), item_mapping.media_type, exclude_domains=set()
+    )
+    linked = {mapping.provider_domain: mapping for mapping in mappings}
+    # only the first linked provider is asked; a miss there is left to the name search
+    provider = next((p for p in providers if p.domain in linked), None)
+    if provider is None:
+        return None, False
+    try:
+        async with _SEARCH_SEMAPHORE:
+            result = await ctrl.get_provider_item(
+                linked[provider.domain].item_id,
+                provider.instance_id,
+                allow_fallback=False,
+                strict_provider_instance=True,
+            )
+    except MediaNotFoundError:
+        LOGGER.debug(
+            "%s no longer has the %s MusicBrainz links to: %s",
+            provider.name,
+            item_mapping.media_type.value,
+            item_mapping.name,
+        )
+        return None, False
+    except MusicAssistantError as err:
+        LOGGER.debug(
+            "Linked %s on %s could not be fetched: %s",
+            item_mapping.media_type.value,
+            provider.name,
+            type(err).__name__,
+        )
+        return None, True
+    if not _is_matching_result(item_mapping, result, artist_name):
+        LOGGER.debug(
+            "Rejecting %s from %s: name mismatch (linked by MusicBrainz for: %s)",
+            result.name,
+            result.provider,
+            item_mapping.name,
+        )
+        return None, False
+    LOGGER.debug(
+        "Match on %s via MusicBrainz: %s (looked up: %s)",
+        result.provider,
+        result.name,
+        item_mapping.name,
+    )
+    return result, False

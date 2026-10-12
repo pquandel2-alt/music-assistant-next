@@ -1,0 +1,802 @@
+{
+    "actions": "Handlinger",
+    "add_library": "Føj til bibliotek",
+    "add_playlist": "Føj til playliste...",
+    "add_queue": "Føj til kø",
+    "add_url_item": "Tilføj emne fra URL",
+    "album": "Album",
+    "album_tracks": "Albumnumre",
+    "album_type": {
+        "album": "Album",
+        "compilation": "Opsamling",
+        "ep": "EP",
+        "single": "Single",
+        "unknown": "Ukendt albumtype",
+        "audiobook": "Lydbog",
+        "podcast": "Podcast"
+    },
+    "albums": "Album",
+    "appears_on": "Optræder på",
+    "artist": "Kunstner",
+    "artist_albums": "Album",
+    "artist_toptracks": "Top numre",
+    "artists": "Kunstnere",
+    "browse": "Gennemse",
+    "clear_selection": "Ryd valg",
+    "close": "Luk",
+    "create_playlist": "Opret ny afspilningsliste på {0}",
+    "dark_mode": "Mørk tilstand",
+    "delete_db": "Slet emne fra databasen",
+    "details": "Detaljer",
+    "enter_url": "Indtast den URL, du vil føje til databasen",
+    "goto_album": "Gå til album {0}",
+    "goto_artist": "Gå til kunstner {0}",
+    "items_selected": "{0} emne(r) valgt",
+    "items_total": "{0} emne(r) i alt",
+    "library": "Bibliotek",
+    "loading": "Data hentes fra serveren.",
+    "mass": "Music Assistant",
+    "new_playlist_name": "Indtast et navn til den nye afspilningsliste",
+    "no_content": "Ingen emner fundet.",
+    "no_content_filter": "Der blev ikke fundet nogen emner med det aktuelle filter\/søgekriterie",
+    "no_player": "Ingen afspiller valgt",
+    "off": "Fra",
+    "on": "Til",
+    "other_versions": "Andre versioner",
+    "perform_action": "Udfør handling på {0} emne(r)",
+    "play": "Afspil",
+    "play_album_from": "Afspil albummet herfra",
+    "play_next": "Afspil næste",
+    "play_now": "Afspil nu",
+    "play_on": "Spil på: {0}",
+    "play_playlist_from": "Afspil afspilningsliste herfra",
+    "player_type": {
+        "group": "Gruppe",
+        "player": "Afspiller",
+        "stereo_pair": "Par i stereo"
+    },
+    "players": "Afspillere",
+    "playlist": "Afspilningsliste",
+    "playlist_tracks": "Sange i playlisten",
+    "playlists": "Afspilningslister",
+    "queue": "Kø",
+    "queue_clear": "Ryd alle emner i køen",
+    "queue_delete": "Slet emne",
+    "queue_empty": "Ingen emner i køen",
+    "queue_move_down": "Flyt ned",
+    "queue_move_up": "Flyt op",
+    "queue_next_items": "Næste emner",
+    "queue_options": "Indstillinger for kø",
+    "queue_previous_items": "Afspillede emner",
+    "radios": "Radio",
+    "read_more": "Læs mere",
+    "refresh_item": "Opdater emne",
+    "remove_library": "Fjern fra biblioteket",
+    "remove_playlist": "Fjern fra afspilningslisten",
+    "search": "Søg",
+    "settings": {
+        "add_new": "Tilføj ny",
+        "configure": "Konfigurer",
+        "delete": "Slet",
+        "disable": "Deaktiver",
+        "documentation": "Dokumentation",
+        "enable": "Aktiver",
+        "enable_player": "Aktiver denne afspiller",
+        "invalid_input": "Indtastningen er ugyldig",
+        "metadataproviders": "Metadata-udbydere",
+        "player_disabled": "Denne afspiller er deaktiveret",
+        "player_name": "Brugerdefineret afspillernavn",
+        "player_not_available": "Denne afspiller er i øjeblikket (endnu) ikke tilgængelig",
+        "player_provider": "Udbyder",
+        "player_settings": "Afspillerindstillinger",
+        "player_type_label": "Afspillertype",
+        "playerproviders": "Afspiller-udbydere",
+        "players": "Afspillere",
+        "provider_disabled": "Denne udbyder er deaktiveret",
+        "provider_name": "Brugerdefineret navn for denne udbyder",
+        "reload": "Genindlæs",
+        "save": "Gem",
+        "settings": "Indstillinger",
+        "sync": "Synkroniser nu",
+        "sync_running": "Denne udbyder synkroniseres",
+        "server_info": "Serveroplysninger",
+        "server_version": "Server-version",
+        "server_as_addon": "Home Assistant add-on",
+        "artists_in_library": "Kunstnere i biblioteket",
+        "albums_in_library": "Albummer i biblioteket",
+        "tracks_in_library": "Sange i biblioteket",
+        "playlists_in_library": "Afspilningslister i biblioteket",
+        "radio_in_library": "Radio i biblioteket",
+        "download_log": "Download log-fil",
+        "add_group_player": "Tilføj gruppe-afspiller",
+        "group_members": "Enheder i gruppen",
+        "default": "standard",
+        "provider_depends_on_confirm": "Før du kan opsætte {0}, skal du have konfigureret {1} udbyderen, vil du gøre det nu?",
+        "theme": {
+            "label": "Tema",
+            "options": {
+                "auto": "Auto (følger systemkonfigurationen)",
+                "light": "Lys",
+                "dark": "Mørk"
+            }
+        },
+        "language": {
+            "label": "Sprog",
+            "options": {
+                "auto": "Auto (følger systemkonfigurationen)",
+                "cs": "Tjekkisk",
+                "da": "Dansk",
+                "de": "Tysk",
+                "en": "Engelsk",
+                "fr": "Fransk",
+                "nl": "Hollandsk",
+                "pl": "Polsk",
+                "uk_UA": "Ukrainsk",
+                "zh_CN": "Kinesisk (forenklet)",
+                "en_AU": "Engelsk (australsk)",
+                "sr": "Serbisk",
+                "sr_Latn": "Serbisk (latin)",
+                "sv_SE": "Svensk",
+                "en_GB": "Engelsk (Storbritannien)",
+                "es": "Spansk",
+                "pt_PT": "Portugisisk",
+                "ko_KR": "Koreansk",
+                "nb": "Norsk",
+                "ru_RU": "Russisk",
+                "pt_BR": "Portugisisk (Brasilien)",
+                "sl_SI": "Slovensk",
+                "hu_HU": "Ungarsk",
+                "it": "Italiensk",
+                "el_GR": "Græsk"
+            }
+        },
+        "dynamic_members": {
+            "label": "Dynamiske gruppemedlemmer",
+            "description": "Tillad medlemmer (midlertidigt) at tilslutte sig\/forlade gruppen dynamisk, så gruppen mere eller mindre opfører sig på samme måde som manuel synkronisering af afspillere, med den største forskel, at gruppeafspilleren holder køen."
+        },
+        "dsp": {
+            "configure_on": "Konfiguration af DSP på: {name}",
+            "disabled_message": "DSP er i øjeblikket deaktiveret. Aktivér den ved hjælp af knappen ovenfor",
+            "input": "Indgang",
+            "output": "Udgang",
+            "filter": {
+                "add": "Tilføj filter",
+                "type": "Filtertype"
+            },
+            "move_up": "Flyt op",
+            "move_down": "Flyt ned",
+            "delete_filter": "Slet filter",
+            "parametric_eq": {
+                "add_band": "Tilføj bånd",
+                "delete_band": "Slet bånd",
+                "filter_type": "Filtertype",
+                "band": "Bånd {index}",
+                "enable_band": "Aktiver bånd",
+                "filter_types": {
+                    "peak": "Peak",
+                    "low_shelf": "Low Shelf",
+                    "high_shelf": "High Shelf",
+                    "low_pass": "Low Pass",
+                    "high_pass": "High Pass",
+                    "notch": "Notch"
+                },
+                "import_apo": "Importer APO\/REW-forudindstilling",
+                "export_apo": "Eksporter APO-forudindstilling",
+                "preamp": "Forforstærker",
+                "add_band_channel": "Tilføj bånd (kun {channel})",
+                "band_channel": "Bånd {index} (kun {channel})",
+                "show_multichannel_controls": "Vis kontrolelementer til flere kanaler",
+                "edited_channel": "Plot svaret fra EQ'en for denne\/disse kanal(er)",
+                "channel": "Dette bånd vil blive anvendt på",
+                "per_channel_preamp": "Ekstra forforstærkning til {channel}"
+            },
+            "tone_control": {
+                "bass_level": "Basniveau",
+                "mid_level": "Mellemtoneniveau",
+                "treble_level": "Diskantniveau"
+            },
+            "parameter": {
+                "frequency": "Frekvens",
+                "gain": "Forstærkning",
+                "q_factor": "Q-faktor"
+            },
+            "types": {
+                "parametric_eq": "Parametrisk EQ",
+                "tone_control": "Tonekontrol",
+                "safety_limiter": "Sikkerhedsbegrænser",
+                "compressor": "Kompressor",
+                "high_low_pass": "Høj-\/lavpas"
+            },
+            "channels": {
+                "ALL": "Alle",
+                "FL": "Venstre",
+                "FR": "Højre"
+            },
+            "channels_compact": {
+                "FL": "V",
+                "FR": "H"
+            },
+            "presets": {
+                "load": "Indlæs DSP-forudindstilling",
+                "empty_warning": "Ingen tilgængelige DSP-forudindstillinger",
+                "save": "Gem DSP-forudindstilling",
+                "name": "Forudindstillingsnavn",
+                "name_placeholder": "Min nye forudindstilling",
+                "remove_confirm": "Er du sikker på, at du vil fjerne denne DSP-forudindstilling?"
+            },
+            "high_low_pass": {
+                "mode": {
+                    "low_pass": "Lavpas"
+                },
+                "mode_desc": {
+                    "high_pass": "Fjerner indholdet under afskæringsgrænsen",
+                    "low_pass": "Fjerner indholdet over afskæringsgrænsen"
+                },
+                "slope": "Hældning",
+                "slope_desc": {
+                    "12": "Blid",
+                    "24": "Mellem",
+                    "48": "Stejl"
+                }
+            }
+        },
+        "dsp_note_multi_device_group": {
+            "label": "Du kan konfigurere DSP'en for hver enkelt afspiller."
+        },
+        "dsp_note_multi_device_group_unsupported": {
+            "label": "Denne type gruppe understøtter ikke DSP ved afspilning til flere enheder."
+        },
+        "add_group_player_desc_universal": "Ved at oprette en Universal Afspiller-gruppe kan du gruppere afspillere fra forskellige udbydere\/økosystemer. \nDette vil distribuere den samme lyd til alle afspillere i gruppen (dog ikke synkroniseret).",
+        "about_description": "Versionsoplysninger, bidragsydere og mere",
+        "core_module": {
+            "metadata": {
+                "name": "Metadata"
+            },
+            "music": {
+                "name": "Musik"
+            },
+            "players": {
+                "name": "Afspillere"
+            },
+            "remote_access": {
+                "name": "Fjernadgang"
+            },
+            "streams": {
+                "name": "Streams"
+            },
+            "webserver": {
+                "name": "Webserver"
+            }
+        },
+        "provider_credits": "Gjort mulig af",
+        "genre_management": "Genrehåndtering",
+        "genre_management_description": "Administrer standardgenrer og gendan standardgenrer",
+        "restore_missing_defaults": "Gendan manglende standardindstillinger",
+        "restore_missing_defaults_description": "Tilføjer eventuelle manglende standardgenrer uden at påvirke dine eksisterende genrer eller brugerdefinerede mapninger.",
+        "full_restore_genres": "Fuld gendannelse (nulstil alt)",
+        "full_restore_genres_description": "Sletter alle genrer og aliasser, genskaber standardindstillingerne og omplacerer alle eksisterende medieelementer. Brug den med forsigtighed!",
+        "confirm_restore_defaults": "Gendan manglende standardgenrer? Dette vil tilføje eventuelle manglende standardgenrer uden at slette eller ændre dine eksisterende genrer.",
+        "confirm_full_restore": "Dette vil SLETTE ALLE eksisterende genrer og aliaser, kun genskabe standardindstillingerne og omlægge alle eksisterende medieelementer til de nye genrer. Alle brugerdefinerede genrer, aliastilknytninger og medieassociationer vil gå tabt.",
+        "confirm_full_restore_2": "Er du helt sikker? Denne handling kan ikke fortrydes.",
+        "restore_success": "Gendannet {0} manglende genre(r).",
+        "restore_all_present": "Alle standardgenrer er allerede til stede.",
+        "full_restore_success": "Fuld gendannelse gennemført. {0} standardgenre(r) gendannet.",
+        "genre_statistics": "Genre-statistik",
+        "restore_defaults_failed": "Kunne ikke gendanne genrestandarder",
+        "full_restore_failed": "Kunne ikke udføre fuld gendannelse af genre",
+        "error_loading_genres": "Fejl ved indlæsning af genrer",
+        "category": {
+            "options": "Afspillerindstillinger",
+            "volume_control": "Lydstyrkekontrol",
+            "audiobooks": "Lydbøger"
+        },
+        "player_needs_setup": "Denne afspiller kræver opsætning",
+        "hass_controls": {
+            "role": {
+                "volume": "Lydstyrke",
+                "mute": "Lyd fra"
+            }
+        },
+        "protocol_native_badge": "Oprindelig",
+        "visualizer_description": "Kvalitet, forudindstillinger og favoritter til MilkDrop-visualizeren",
+        "visualizer_enabled": {
+            "label": "MilkDrop-visualisering",
+            "description": "Vis en MilkDrop-visualizer bag afspilleren i fuldskærmstilstand, der reagerer live på musikken. Hver afspiller kan deaktivere denne funktion via sin fuldskærmmenu. Bølgeformen hentes fra Sendspin-sporet, så den tilbydes kun til afspillere med en Sendspin-udgang."
+        },
+        "visualizer_blur": {
+            "label": "Visualizer-sløring",
+            "description": "Gør visualizeren blødere for at skabe en roligere baggrund. 0 deaktiverer sløring."
+        },
+        "ha_kiosk_mode": {
+            "label": "Brug fuldskærm i Home Assistant",
+            "description": "Skjul Home Assistant-overskriften og sidepanelet, så Music Assistant fylder hele skærmen. Du kan få dem frem igen ved at trykke på Home Assistant-knappen i menuen."
+        },
+        "delete_player_title": "Slet {0}?",
+        "delete_player_confirmation": "Denne afspiller vil blive fjernet fra Music Assistant. Dens indstillinger går tabt, og den kan kun genoprettes ved at konfigurere den på ny.",
+        "queue_settings_description": "Afspilningsindstillinger for den kø, som denne afspiller afspiller fra",
+        "dsp_description": "Der anvendes filtre og forstærkning på alt, hvad denne afspiller afspiller",
+        "player_options_description": "Indstillinger og måleværdier, som afspilleren selv tilbyder",
+        "volume_slider_mode": {
+            "label": "Funktionsmåde for lydstyrkeskyderen",
+            "description": "Absolut: Når du trykker på eller trækker i skyderen, indstilles lydstyrken til den pågældende position. Relativ: Når du trækker, justeres lydstyrken op eller ned fra den aktuelle lydstyrke med halv hastighed, hvilket gør det nemmere at foretage små justeringer.",
+            "options": {
+                "absolute": "Absolut (spring til position)",
+                "relative": "Relativ (træk for at justere)"
+            }
+        },
+        "volume_haptics": {
+            "label": "Haptisk feedback ved lydstyrke",
+            "description": "Vibrer, når lydstyrkeskyderen justeres. Gælder kun enheder med vibrator."
+        },
+        "player_option_error": "Der opstod en fejl under indstilling af afspillerindstillinger: {key} {value}",
+        "server_logs_load_failed": "Det lykkedes ikke at indlæse serverlogfilerne",
+        "audiobook_chapter_progress": {
+            "label": "Vis fremskridt i lydbogens kapitler",
+            "description": "Vis den forløbne og resterende tid for det aktuelle kapitel i lydbogen i stedet for hele lydbogen."
+        }
+    },
+    "show_info": "Vis info",
+    "show_select_boxes": "Vis valgfelter",
+    "shuffle": "Bland",
+    "sort": {
+        "duration": "Varighed",
+        "position": "Position",
+        "provider": "Udbyder",
+        "sort_name": "Alfabetisk",
+        "track_number": "Sangnummer",
+        "year": "Udgivelsesår",
+        "position_desc": "Position",
+        "album": "Album",
+        "artist": "Kunstner",
+        "name": "Alfabetisk",
+        "name_desc": "Alfabetisk (faldende)",
+        "year_desc": "Udgivelsesår (faldende)",
+        "duration_desc": "Varighed (faldende)",
+        "original": "Original",
+        "sort_name_desc": "Alfabetisk (faldende)",
+        "timestamp_added": "Dato tilføjet",
+        "timestamp_added_desc": "Dato tilføjet (faldende)",
+        "timestamp_modified": "Dato for opdatering",
+        "timestamp_modified_desc": "Dato for opdatering (faldende)",
+        "last_played": "Sidst spillet",
+        "last_played_desc": "Sidst spillet (faldende)",
+        "play_count": "Antal afspilninger",
+        "play_count_desc": "Antal afspilninger (faldende)",
+        "ascending": "Stigende",
+        "ascending_abbreviation": "Stg.",
+        "descending": "Faldende",
+        "descending_abbreviation": "Fld."
+    },
+    "state": {
+        "idle": "keder sig",
+        "off": "slukket",
+        "paused": "stoppet",
+        "playing": "spiller"
+    },
+    "sync_now": "Synkroniser {0} nu",
+    "sync_running": "En eller flere musikudbydere er ved at blive synkroniseret.",
+    "tooltip": {
+        "album_artist_filter": "Skift album-kunstner-filter",
+        "explicit": "Eksplicit",
+        "filter_library": "Skift bibliotek-favorit-filter",
+        "library": "Skift bibliotek-favorit",
+        "refresh": "Opdater listen",
+        "refresh_new_content": "Der er nyt indhold tilgængeligt, klik for at opdatere listen",
+        "search": "Vis\/skjul søgefelt",
+        "select_items": "Vælg flere elementer",
+        "sort_options": "Sorteringsmuligheder",
+        "toggle_view_mode": "Skift visning liste\/panel",
+        "filter_favorites": "Vis kun favoritter",
+        "favorite": "Markér\/fravælg som favorit",
+        "open_provider_link": "Åbn dette element på udbyderens hjemmeside",
+        "collapse_expand": "Skjul\/udvid listen",
+        "back": "Tilbage",
+        "search_filter_active": "Søgningen filtrerer i øjeblikket resultater",
+        "play_sample": "Afspil prøve",
+        "album_type": "Album type",
+        "loading": "Serveren behandler en anmodning eller synkroniserer musik.",
+        "primary_image": "Dette er det primære billede for denne billedtype",
+        "copy_uri": "Kopier URI til udklipsholder",
+        "select_all": "Vælg alle elementer",
+        "hide_empty_genres": "Skjul tomme genrer",
+        "show_empty_genres": "Vis tomme genrer",
+        "filter_genre": "Filtrer efter genre",
+        "select_provider": "Vælg udbyder",
+        "volume_down": "Skru ned for lyden",
+        "volume_up": "Skru op for lyden",
+        "show_full_path": "Vis den fulde sti",
+        "show_menu": "Vis\/skjul menu",
+        "show_context_menu": "Vis kontekstmenuen",
+        "scroll_left": "Rul til venstre",
+        "scroll_right": "Rul til højre",
+        "hide_provider": "Skjul musikudbyder",
+        "exit_select_items": "Afslut multi-valg",
+        "playing_from": "Afspiller fr"
+    },
+    "topresult": "Bedste resultat",
+    "track": "Sang",
+    "track_number": "Disc {0} Sang {1}",
+    "tracks": "Sange",
+    "try_global_search": "Prøv global søgning",
+    "type_to_search": "Skriv her for at søge...",
+    "volume_normalization": "Volume-normalisering",
+    "play_now_replace": "Afspil nu (ryd kø)",
+    "currently_playing": "Spiller nu",
+    "favorites_add": "Tilføj til favoritter",
+    "favorites_remove": "Fjern fra favoritter",
+    "confirm_library_remove": "Er du sikker på, at du vil slette dette element fra biblioteket? Alle elementer, der er afhængige af dette element, vil også blive fjernet rekursivt. Bemærk, at det kun vil fjerne dette element fra biblioteket. Hvis det er en musikfil på disken, vender den muligvis tilbage ved næste synkronisering.",
+    "check_item_on_provider": "Tjek {0} på {1}",
+    "check_item_in_library": "Tjek {0} i biblioteket",
+    "media_details": "Mediedetaljer",
+    "item_in_library": "Dette element er tilgængeligt i biblioteket",
+    "back": "Tilbage",
+    "recently_played": "Nyligt afspillet",
+    "load_more_items": "Indlæs flere emner...",
+    "radio": "Radio",
+    "muted": "dæmpet",
+    "enter_name": "Indtast et nyt (brugerdefineret) navn",
+    "image_url": "Indtast URL'en til et billede eller ikon (valgfrit)",
+    "invalid_input": "Input var ugyldigt",
+    "new_playlist": "Ny playliste",
+    "create_playlist_on": "Opret ny playliste på {0}",
+    "view": {
+        "list": "Listevisning",
+        "panel": "Panelvisning",
+        "panel_compact": "Kompakt panelvisning",
+        "discovery": "Udforsk"
+    },
+    "play_replace": "Afspil nu (ryd køen)",
+    "played": "Afspillet",
+    "images": "Billeder",
+    "image_type": "Type",
+    "image_source": "Kilde",
+    "image_make_primary": "Gør til primær",
+    "update_metadata": "Opdater metadata",
+    "cancel": "Annuller",
+    "transfer_queue": "Overfør kø",
+    "power_on_player": "Tænd",
+    "power_off_player": "Sluk",
+    "powered_off_players": "Slukkede afspillere",
+    "sync_player_with": "Synkroniser med en anden spiller",
+    "select_repeat_mode": "Vælg gentagelsestilstand",
+    "repeat_mode": {
+        "all": "Gentag hele køen",
+        "off": "Deaktivér gentag",
+        "one": "Gentag enkelt spor"
+    },
+    "shuffle_disable": "Deaktivér bland",
+    "shuffle_enable": "Aktivér bland",
+    "open_dsp_settings": "Åbn DSP-indstillinger",
+    "audiobook": "Lydbog",
+    "audiobooks": "Lydbøger",
+    "chapter": "Kapitel",
+    "chapters": "Kapitler",
+    "podcast": "Podcast",
+    "podcasts": "Podcasts",
+    "item_fully_played": "Dette element er blevet afspillet",
+    "item_in_progress": "Dette element er blevet delvist afspillet",
+    "duration_in_seconds": "{0} sekunder",
+    "mark_played": "Markér som afspillet",
+    "mark_unplayed": "Markér som uafspillet",
+    "searchtype_all": "Alt",
+    "global_search": "Global søgning",
+    "podcast_episode": "Episode",
+    "podcast_episodes": "Episoder",
+    "dsp_active": "Aktiv",
+    "currently_playing_players": "Spiller nu",
+    "all_players": "Alle afspillere",
+    "all_groups": "Alle grupper",
+    "no_player_playing": "Ingen afspillere spiller i øjeblikket",
+    "stop_playback": "Stop afspilning",
+    "streamdetails": {
+        "input_header": "Indgang",
+        "output_header": "Udgang",
+        "eq_band_count": "{0} bånd",
+        "eq_band_count_singular": "1 bånd",
+        "input_gain": "Indgangsforstærkning ({0} dB)",
+        "output_gain": "Udgangsforstærkning ({0} dB)",
+        "file_info": {
+            "container": "Container: {0}",
+            "codec": "Kodeks: {0}",
+            "bit_rate": "Bit rate: {0} kbps",
+            "sample_rate": "Samplingsfrekvens: {0} kHz",
+            "channels": "Kanaler: {0}",
+            "bit_depth": "Bitdybde: {0}"
+        }
+    },
+    "select_source": "Vælg kilde",
+    "play_replace_next": "Afspil næste (ryd køen)",
+    "all_enqueue_options": "Alle muligheder for at sætte i kø",
+    "music_assistant_source": "Music Assistant kø ",
+    "music_assistant_library": "Music Assistent bibliotek",
+    "select_all_confirmation": "Vælg alle elementer? Denne handling kan bruge et øjeblik på at indlæse alle data.",
+    "this_device": "Denne enhed",
+    "homescreen_edit_enable": "Rediger startskærmen",
+    "homescreen_edit_disable": "Forlad redigeringstilstand for startskærmen",
+    "lyrics_will_appear_soon": "Sangteksten vises, når sangen begynder...",
+    "discover": "Udforsk",
+    "confirm_remove_alias": "Er du sikker på, at du vil fjerne aliaset \"{0}\" fra denne genre?",
+    "delete": "Slet",
+    "delete_genre": "Slet genre",
+    "description": "Beskrivelse",
+    "genre": "Genre",
+    "genres": "Genrer",
+    "link": "Link",
+    "link_alias": "Link-alias",
+    "link_alias_failed": "Kunne ikke linke alias",
+    "alias_linked_successfully": "Aliaset linket",
+    "mapped_aliases": "Tilknyttede aliaser",
+    "no_aliases": "Ingen aliasser er linket endnu.",
+    "promote": "Forfrem",
+    "promote_alias": "Forfrem til genre",
+    "promote_alias_failed": "Kunne ikke forfremme alias",
+    "promote_alias_successfully": "Alias forfremmet",
+    "remove": "Slet",
+    "remove_alias": "Slet alias",
+    "remove_alias_failed": "Kunne ikke fjerne alias",
+    "delete_genres": "Slet {0} genre(r)",
+    "confirm_delete_genres": "Er du sikker på, at du vil slette {0} genre(r)? Genrerne vil blive fjernet sammen med deres alias-mapninger.",
+    "genres_deleted": "{0} genrer slettet",
+    "merge_into": "Flet ind i eksisterende genre",
+    "merge_genres": "Flet genrer",
+    "merge_genres_description": "Vælg en mål-genre at flette ind i. Alle aliasser og kortlagte medier fra kildegenrerne overføres til målet.",
+    "merge_genres_warning": "Følgende genrer vil blive slettet: {0}",
+    "merge_genres_success": "Genrer flettet",
+    "merge_genres_failed": "Kunne ikke flette genrer",
+    "select_target_genre": "Vælg mål-genre",
+    "server_state": {
+        "starting": "Serveren starter op. Nogle udbydere, afspillere eller funktioner er muligvis ikke tilgængelige, før opstarten er afsluttet.",
+        "stopping": "Serveren lukker ned...",
+        "stopped": "Serveren er stoppet"
+    },
+    "link_to_genre": "Link til genre",
+    "link_to_genre_title": "Link til genre",
+    "link_to_genre_description": "Vælg en genre, som de valgte elementer skal linkes til.",
+    "link_to_genre_success": "Linket til genre",
+    "link_to_genre_failed": "Kunne ikke linke til genre",
+    "player_options": {
+        "open": "Åbn afspillerindstillinger",
+        "settable": "Redigerbare indstillinger for afspilleren {0}",
+        "read_only": "Skrivebeskyttede indstillinger for afspilleren {0}"
+    },
+    "select_sound_mode": "Vælg lydtilstand",
+    "refresh": "Genindlæs",
+    "enqueue": "Indstillinger for at sætte i kø",
+    "queue_option": {
+        "play": "Afspil nu (behold køen)",
+        "next": "Afspil næste (behold køen)",
+        "replace": "Afspil nu (erstat kø)",
+        "replace_next": "Afspil næste (erstat kø)",
+        "add": "Føj til køen"
+    },
+    "playlist_create_media_types": "Udbyderen {0} understøtter disse medietyper:",
+    "playlist_mix_allowed": "Disse medietyper kan blandes.",
+    "playlist_mix_not_allowed": "Denne udbyder understøtter ikke blanding af medietyper i afspilningslister. Vælg venligst, hvilken medietype du ønsker at oprette en afspilningsliste for:",
+    "playlist_create_provider_error": "Kan ikke få fat i udbyder.",
+    "playlist_create_no_type_selected": "Ingen medietype valgt",
+    "providers": {
+        "party": {
+            "get_started": "Spil noget musik for at sætte gang i festen!",
+            "nothing_playing": "Venter på der bliver valgt en sang",
+            "link_copy_fail": "Kunne ikke kopiere link",
+            "copy_link": "Kopier link"
+        },
+        "music_quiz": {
+            "copy_link": "Kopiér link",
+            "dashboard_waiting": "Venter på, at quizzen starter",
+            "name_that_track": "Gæt titlen på sangen",
+            "player": "Spiller",
+            "choose_player": "Vælg en spiller",
+            "no_available_players": "Der blev ikke fundet nogen tilgængelige afspillere. Brug fjernadgangsfunktionen, eller kontroller afspillerindstillingerne.",
+            "how_to_play_guess_the_song_description": "Lyt til den sang, der spiller, og vælg den rigtige titel blandt valgmulighederne, inden tiden løber ud.",
+            "how_to_play_trivia_description": "Besvar quizspørgsmål om musik. Vælg det svar, du mener er rigtigt, inden tiden løber ud.",
+            "landing_continue": "Fortsæt"
+        },
+        "ai_radio": {
+            "fields": {
+                "voice": "Stemme",
+                "host": "Vært",
+                "language": "Sprog"
+            },
+            "confirm": {
+                "delete_host_title": "Slet vært?",
+                "delete_host": "Slet denne vært?"
+            },
+            "toast": {
+                "host_saved": "Vært gemt",
+                "host_deleted": "Vært slettet",
+                "tts_engines_load_failed": "Kunne ikke indlæse stemmeindstillinger"
+            },
+            "gallery": {
+                "title": "Shows",
+                "add_show": "Tilføj show"
+            },
+            "create": {
+                "validation": {
+                    "host_required": "Vælg en vært"
+                },
+                "playlist_search": "Søg i afspilningslister"
+            },
+            "customize": {
+                "segment_templates": {
+                    "intro": "Intro",
+                    "transition": "Overgang",
+                    "weather": "Vejr",
+                    "news": "Nyheder",
+                    "artist_fact": "Fakta om kunstneren"
+                },
+                "host_placeholder": "Vælg en vært",
+                "host_required": "Vælg en vært, før du gemmer",
+                "no_hosts_hint": "Du skal have en vært, før du kan gemme dette program.",
+                "create_host_cta": "Opret en vært",
+                "prompt_placeholders_label": "Eksempler — tryk for at kopiere:",
+                "prompt_placeholder_copied": "{0} er kopieret til udklipsholderen",
+                "prompt_placeholder_copy_failed": "Det lykkedes ikke at kopiere {0} til udklipsholderen",
+                "prompt_placeholder_copy_aria": "Kopier {0}",
+                "option_key_placeholder": "f.eks. stemme",
+                "option_value": "Valgmulighedsværdi",
+                "option_value_placeholder": "f.eks. en_US-lessac-medium",
+                "add_option": "Tilføj valgmulighed",
+                "remove_option": "Fjern valgmulighed"
+            },
+            "hosts": {
+                "title": "Værter",
+                "add_host": "Tilføj vært",
+                "card": {
+                    "edit": "Rediger"
+                },
+                "editor": {
+                    "title": "Tilpas vært",
+                    "save": "Gem vært",
+                    "name_label": "Værtsnavn",
+                    "default_voice": "Standard",
+                    "validation": {
+                        "name_required": "Værtsnavn er påkrævet",
+                        "name_check_failed": "Det var ikke muligt at bekræfte, at navnet er unikt. Der blev ikke gemt noget.",
+                        "segments_required": "Tilføj mindst ét segment",
+                        "segment_prompt_required": "Hvert segment skal have en prompt"
+                    },
+                    "default_language": "Følg serverens sprog"
+                },
+                "blank_host": "Tom vært"
+            }
+        }
+    },
+    "smart_playlist": {
+        "match_all": "alle",
+        "match_any": "enhver",
+        "match_following": "af følgende regler",
+        "no_filters": "Ingen filtre endnu. Tilføj et for at begrænse resultatet.",
+        "no_rules": "Ingen regler endnu. Tilføj en for at begynde at matche numre.",
+        "no_rules_desc": "Numre udvælges tilfældigt fra hele dit bibliotek. Tilføj en regel for at begrænse udvalget.",
+        "no_rules_title": "Alle bibliotekets numre",
+        "op_between": "mellem",
+        "picker_empty_no_match": "Ingen {label} matcher din søgning.",
+        "picker_empty_remote": "Skriv for at søge efter en {label}.",
+        "picker_empty_search": "Skriv mindst 2 tegn for at finde en {label}.",
+        "op_is": "er",
+        "op_is_not": "er ikke",
+        "seed_count_hint": "Op til 50 numre fra din streamingudbyder, opdateres ved hver afspilning.",
+        "seed_filters_hint": "Filtre er kun efter bedste evne. Nogle musikudbydere leverer ikke de nødvendige metadata til at anvende filtre.",
+        "seed_heading": "Opdag musik, der ligner følgende numre, kunstnere, album eller playlister",
+        "seed_no_provider": "Ingen streamingtjenester understøtter lignende numre",
+        "type_library": "Fra mit bibliotek",
+        "type_library_desc": "Byg ud fra musik, du allerede har i dit bibliotek.",
+        "type_seed": "Opdag",
+        "type_seed_desc": "Opdag musik via dine streamingtjenester.",
+        "add_seed": "Tilføj kilde",
+        "seed_label": "Kilde",
+        "seed_album_pick": "Vælg et album",
+        "seed_full": "Du har nået det maksimale antal kilder",
+        "seed_playlist_pick": "Vælg en playliste",
+        "name_label": "Navn",
+        "name_required": "Indtast et navn",
+        "field_album_type_is": "Album type er",
+        "field_album_type_is_not": "Album type er ikke",
+        "picker_search": "Søg {label}"
+    },
+    "background_tasks": {
+        "toast": {
+            "log_download_failed": "Ingen opgavelog tilgængelig til at hente."
+        }
+    },
+    "artist_topalbums": "Top albums",
+    "in_library": "I dit bibliotek",
+    "artist_all_albums": "Alle albums",
+    "artist_all_tracks": "Alle numre",
+    "player_select": {
+        "active_player_volume_only": "Vis kun lydstyrkeskydere for aktive afspillere",
+        "and_more": "...og {0} mere",
+        "disable_player_confirmation": "Denne afspiller vil være skjult, indtil den aktiveres igen i afspillerindstillingerne.",
+        "disable_player_title": "Deaktiver {0}?",
+        "display_options": "Visningsindstillinger",
+        "rename_player": "Omdøb afspiller",
+        "rename_player_description": "Indtast et nyt navn til denne afspiller.",
+        "show_active_players_first": "Vis aktive afspillere først",
+        "show_grouped_players": "Vis gruppemedlemmer",
+        "show_selected_player_first": "Vis den valgte afspiller først"
+    },
+    "mark_played_partial_failure": "Kunne ikke opdatere {0} episode(r)",
+    "visualizer": {
+        "no_favorites": "Ingen favoritter endnu. Marker den aktuelle forudindstilling med en stjerne i fuldskærmsafspilleren.",
+        "remove_favorite": "Fjern favorit",
+        "credits": "Bidragsydere",
+        "credits_butterchurn": "Rendering leveret af Butterchurn af Jordan Berg (MIT-licens), WebGL-implementeringen af MilkDrop 2.",
+        "credits_milkdrop": "MilkDrop blev oprindeligt udviklet af Ryan Geiss som en visualizer til Winamp. Forudindstillingerne er udarbejdet af MilkDrop-fællesskabet og samlet via butterchurn-presets."
+    },
+    "ai_dj": "Aktivér AI Radio DJ",
+    "ai_dj_off": "Fra",
+    "ai_dj_show_on_air": "I gang: {0}",
+    "ai_dj_show_on_air_unknown": "Et program er i gang",
+    "menu": "Menu",
+    "main_navigation": "Hovedside",
+    "play_announcement": "Afspil meddelelse",
+    "play_announcement_explanation": "Indtal en besked højt på {0}.",
+    "play_announcement_message": "Besked",
+    "play_announcement_message_placeholder": "Middagen er klar!",
+    "play_announcement_pre_announce": "Spil først en notifikationslyd",
+    "play_announcement_send": "Udsend meddelelse",
+    "play_announcement_sent": "Meddelelse sendt til {0}",
+    "play_announcement_playing": "Afspiller...",
+    "play_announcement_volume": "Lydstyrke",
+    "play_announcement_volume_default": "Standardindstilling for afspiller",
+    "home_assistant_menu": "Home Assistant",
+    "playback_speed_value": "{0}x",
+    "offline_ready": "Appen er klar til at fungere offline",
+    "update_available": "Der er en ny version tilgængelig. Opdater siden for at hente den.",
+    "reload": "Genindlæs",
+    "open_settings": "Indstillinger",
+    "faceted_filter": {
+        "clear": "Ryd filtre",
+        "clear_all_for": "Ryd alle filtre på {title}",
+        "clear_for": "Ryd filtre for » {title} «",
+        "remove_filter": "Fjern filteret » {label} «",
+        "search_for": "Søg {title}",
+        "selected": "{count} valgt"
+    },
+    "clear": "Ryd",
+    "pagination": {
+        "first_page": "Gå til første side",
+        "previous_page": "Gå til forrige side",
+        "next_page": "Gå til næste side",
+        "last_page": "Gå til sidste side"
+    },
+    "data_table": {
+        "view": "Visning",
+        "toggle_columns": "Vis\/skjul kolonner",
+        "hide": "Skjul"
+    },
+    "sidebar": {
+        "title": "Sidepanel",
+        "toggle": "Vis\/skjul sidepanelet",
+        "expand": "Vis sidepanelet",
+        "collapse": "Skjul sidepanelet"
+    },
+    "loading_short": "Indlæser",
+    "player_group_playback": {
+        "title": "Afspillergrupper",
+        "remove_message": "Afspilningen er aktiv på {0}. Hvis denne afspiller fjernes fra gruppen, flyttes afspilningssessionen over til de resterende afspillere.",
+        "power_off_message": "Afspilningen er aktiv på {0}. Hvis du slukker for den, flyttes afspilningssessionen til de resterende afspillere.",
+        "keep_playing": "Fortsæt afspilning",
+        "stop_and_ungroup": "Stop og ophæv gruppering"
+    },
+    "play_shuffled": "Afspil blandet",
+    "players_in_group": "Spillere i gruppen",
+    "dashboard": {
+        "get_url": "Hent URL til kontrolpanelet",
+        "uri_copied": "Dashboard-URL'en er kopieret til udklipsholderen",
+        "uri_copy_failed": "Det lykkedes ikke at kopiere Dashboard-URL’en til udklipsholderen"
+    },
+    "audio_overlay_custom_sounds": "Brugerdefinerede lyde",
+    "audio_overlay_add_custom": "Tilføj brugerdefineret lyd",
+    "audio_overlay_add_custom_explanation": "Tilføj din egen stemningslyd via en streaming-URL.",
+    "audio_overlay_no_custom_sounds": "Der er endnu ikke tilføjet nogen brugerdefinerede lyde.",
+    "audio_overlay_custom_added": "{0} tilføjet",
+    "audio_overlay_custom_add_failed": "Det lykkedes ikke at tilføje den brugerdefinerede lyd. Kontroller, at URL’en peger på et lydspor, der kan afspilles.",
+    "search_in": "Søg i {0}...",
+    "pages": "Sider",
+    "recent_searches": "Seneste søgninger",
+    "command_center_navigate": "naviger",
+    "command_center_open": "åben",
+    "command_center_keep_typing": "Fortsæt med at skrive for at søge..."
+}

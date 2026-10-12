@@ -1,0 +1,324 @@
+import { createGuestQuizAffinity } from "@/helpers/guest_quiz_affinity";
+import { Scope, UserRole } from "@/plugins/api/interfaces";
+import { AuthManager } from "@/plugins/auth";
+import { store } from "@/plugins/store";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { user } from "../fixtures/user";
+
+const { localStorageMock, sessionStorageMock } = vi.hoisted(() => {
+  const createStorage = () => {
+    const values = new Map<string, string>();
+    return {
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      removeItem: (key: string) => {
+        values.delete(key);
+      },
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+  };
+  const localStorageMock = createStorage();
+  const sessionStorageMock = createStorage();
+  vi.stubGlobal("localStorage", localStorageMock);
+  vi.stubGlobal("sessionStorage", sessionStorageMock);
+  return { localStorageMock, sessionStorageMock };
+});
+
+describe("AuthManager guest sessions", () => {
+  beforeEach(() => {
+    localStorageMock.clear();
+    sessionStorageMock.clear();
+  });
+
+  afterAll(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("migrates a legacy persistent guest token to the current tab", () => {
+    const guestToken = createToken("guest-token-1", "party_guest");
+    localStorage.setItem("ma_access_token", guestToken);
+
+    const authManager = new AuthManager();
+
+    expect(authManager.getToken()).toBe(guestToken);
+    expect(authManager.isGuestAccessSession()).toBe(true);
+    expect(localStorage.getItem("ma_access_token")).toBeNull();
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBe(guestToken);
+  });
+
+  it("keeps the regular token while guest access is active in the tab", () => {
+    const regularToken = createToken("regular-token", "admin");
+    const guestToken = createToken("guest-token", "music_quiz_guest");
+    localStorage.setItem("ma_access_token", regularToken);
+    const authManager = new AuthManager();
+
+    authManager.setToken(guestToken);
+    sessionStorage.setItem("ma_guest_remote_id", "guest-remote-id");
+    sessionStorage.setItem(
+      "ma_guest_server_address",
+      "http://guest-server:8095",
+    );
+
+    expect(authManager.getToken()).toBe(guestToken);
+    expect(localStorage.getItem("ma_access_token")).toBe(regularToken);
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBe(guestToken);
+
+    authManager.clearGuestSession();
+
+    expect(authManager.getToken()).toBe(regularToken);
+    expect(authManager.isGuestAccessSession()).toBe(false);
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBeNull();
+    expect(sessionStorage.getItem("ma_guest_remote_id")).toBeNull();
+    expect(sessionStorage.getItem("ma_guest_server_address")).toBeNull();
+  });
+
+  it("returns only a saved regular token for session reuse", () => {
+    const authManager = new AuthManager();
+    const regularToken = createToken("regular-token", "admin");
+    const connectionIdentity = "local:http://music-assistant:8095";
+    authManager.setToken(regularToken, connectionIdentity);
+
+    expect(authManager.getPersistentToken(connectionIdentity)).toBe(
+      regularToken,
+    );
+    expect(
+      authManager.getPersistentToken("local:http://other-server:8095"),
+    ).toBeNull();
+
+    authManager.setToken(createToken("guest-token", "party_guest"));
+    expect(authManager.getPersistentToken(connectionIdentity)).toBe(
+      regularToken,
+    );
+  });
+
+  it("does not reuse an unbound regular token", () => {
+    const authManager = new AuthManager();
+    const regularToken = createToken("regular-token", "admin");
+    const connectionIdentity = "local:http://music-assistant:8095";
+    authManager.setToken(regularToken);
+
+    expect(authManager.getPersistentToken(connectionIdentity)).toBeNull();
+
+    authManager.bindPersistentToken(connectionIdentity);
+    expect(authManager.getPersistentToken(connectionIdentity)).toBe(
+      regularToken,
+    );
+  });
+
+  it("preserves affinity only while the same participant token remains active", () => {
+    const firstToken = createToken("guest-token-1", "party_guest");
+    sessionStorage.setItem("ma_guest_access_token", firstToken);
+    createGuestQuizAffinity(createQuizContext("guest-token-1")).record();
+    const authManager = new AuthManager();
+
+    authManager.setToken(firstToken);
+    expect(sessionStorage.getItem("music_quiz_guest_affinity")).not.toBeNull();
+
+    authManager.setToken(createToken("guest-token-2", "party_guest"));
+    expect(sessionStorage.getItem("music_quiz_guest_affinity")).toBeNull();
+  });
+
+  it("stores a dashboard viewer token like a guest token", () => {
+    const regularToken = createToken("regular-token", "admin");
+    const dashboardToken = createToken("dashboard-token", "dashboard_viewer");
+    localStorage.setItem("ma_access_token", regularToken);
+    const authManager = new AuthManager();
+
+    authManager.setToken(dashboardToken);
+
+    expect(authManager.isDashboardViewer()).toBe(true);
+    expect(authManager.isGuestAccessSession()).toBe(false);
+    expect(authManager.getToken()).toBe(dashboardToken);
+    expect(localStorage.getItem("ma_access_token")).toBe(regularToken);
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBe(
+      dashboardToken,
+    );
+  });
+
+  it("restores a stored dashboard viewer token on reload", () => {
+    const dashboardToken = createToken("dashboard-token", "dashboard_viewer");
+    sessionStorage.setItem("ma_guest_access_token", dashboardToken);
+
+    const authManager = new AuthManager();
+
+    expect(authManager.getToken()).toBe(dashboardToken);
+    expect(authManager.isDashboardViewer()).toBe(true);
+  });
+
+  it("clears persistent and guest credentials on full logout", () => {
+    const authManager = new AuthManager();
+    authManager.setToken(createToken("regular-token", "admin"));
+    createGuestQuizAffinity(createQuizContext("guest-token-1")).record();
+
+    authManager.clearAuth();
+
+    expect(authManager.getToken()).toBeNull();
+    expect(localStorage.getItem("ma_access_token")).toBeNull();
+    expect(localStorage.getItem("ma_access_token_connection")).toBeNull();
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBeNull();
+    expect(sessionStorage.getItem("music_quiz_guest_affinity")).toBeNull();
+  });
+
+  it("restores the saved regular token when a dashboard viewer session is cleared", () => {
+    const regularToken = createToken("regular-token", "admin");
+    const dashboardToken = createToken("dashboard-token", "dashboard_viewer");
+    localStorage.setItem("ma_access_token", regularToken);
+    const authManager = new AuthManager();
+    authManager.setToken(dashboardToken);
+
+    authManager.clearGuestSession();
+
+    expect(authManager.getToken()).toBe(regularToken);
+    expect(authManager.isDashboardViewer()).toBe(false);
+    expect(sessionStorage.getItem("ma_guest_access_token")).toBeNull();
+  });
+
+  describe("endRejectedGuestSession", () => {
+    it("reports no guest session and writes no marker for a regular session", () => {
+      const authManager = new AuthManager();
+      authManager.setToken(createToken("regular-token", "admin"));
+
+      expect(authManager.endRejectedGuestSession()).toEqual({
+        outcome: "no-guest-session",
+      });
+      expect(sessionStorage.getItem("ma_guest_session_ended")).toBeNull();
+    });
+
+    it("restores the device's own session and writes no marker when one is saved", () => {
+      const regularToken = createToken("regular-token", "admin");
+      const guestToken = createToken("guest-token", "party_guest");
+      localStorage.setItem("ma_access_token", regularToken);
+      const authManager = new AuthManager();
+      authManager.setToken(guestToken);
+      const reloadSpy = vi
+        .spyOn(window.location, "reload")
+        .mockImplementation(() => {});
+
+      const result = authManager.endRejectedGuestSession();
+
+      expect(result).toEqual({ outcome: "own-session-restored" });
+      expect(reloadSpy).toHaveBeenCalledOnce();
+      expect(authManager.getToken()).toBe(regularToken);
+      expect(sessionStorage.getItem("ma_guest_session_ended")).toBeNull();
+
+      reloadSpy.mockRestore();
+    });
+
+    it("records the ended kind when no regular session is saved", () => {
+      const guestToken = createToken("guest-token", "party_guest");
+      const authManager = new AuthManager();
+      authManager.setToken(guestToken);
+
+      const result = authManager.endRejectedGuestSession();
+
+      expect(result).toEqual({ outcome: "ended", kind: "party" });
+      expect(sessionStorage.getItem("ma_guest_session_ended")).toBe("party");
+    });
+  });
+
+  it("drops both join codes but keeps the remote id when returning to the app", () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?join=ABCD1234&dashboard=WXYZ5678&remote_id=REMOTE#/guest",
+    );
+    const authManager = new AuthManager();
+    const reloadSpy = vi
+      .spyOn(window.location, "reload")
+      .mockImplementation(() => {});
+
+    authManager.returnToFullApp();
+
+    expect(window.location.search).not.toContain("join");
+    expect(window.location.search).not.toContain("dashboard");
+    expect(window.location.search).toContain("remote_id=REMOTE");
+    expect(window.location.hash).toBe("#/discover");
+
+    reloadSpy.mockRestore();
+  });
+
+  it("resets the route on logout so the next user starts at discover", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/?remote_id=REMOTE#/artists/library/1",
+    );
+    const authManager = new AuthManager();
+    const reloadSpy = vi
+      .spyOn(window.location, "reload")
+      .mockImplementation(() => {});
+
+    await authManager.logout();
+
+    expect(window.location.hash).toBe("#/discover");
+    expect(window.location.search).toContain("remote_id=REMOTE");
+    expect(reloadSpy).toHaveBeenCalledOnce();
+
+    reloadSpy.mockRestore();
+  });
+});
+
+describe("AuthManager scopes", () => {
+  beforeEach(() => {
+    store.currentUser = undefined;
+    store.roleScopes = {};
+  });
+
+  it("grants a scope its role holds", () => {
+    store.currentUser = user({ role: UserRole.USER });
+    store.roleScopes = { user: [Scope.CONFIG_PROVIDERS_OWN] };
+
+    expect(new AuthManager().hasScope(Scope.CONFIG_PROVIDERS_OWN)).toBe(true);
+  });
+
+  it("grants every scope to a role holding the wildcard", () => {
+    store.currentUser = user({ role: UserRole.ADMIN });
+    store.roleScopes = { admin: [Scope.ALL] };
+
+    expect(new AuthManager().hasScope(Scope.CONFIG_PROVIDERS_OWN)).toBe(true);
+  });
+
+  it("denies a scope its role does not hold", () => {
+    store.currentUser = user({ role: UserRole.USER });
+    store.roleScopes = { user: [Scope.LIBRARY_READ] };
+
+    expect(new AuthManager().hasScope(Scope.CONFIG_PROVIDERS_OWN)).toBe(false);
+  });
+
+  it("denies every scope to a role the server did not list", () => {
+    store.currentUser = user({ role: "power_user" });
+    store.roleScopes = { admin: [Scope.ALL] };
+
+    expect(new AuthManager().hasScope(Scope.LIBRARY_READ)).toBe(false);
+  });
+
+  it("denies every scope when nobody is signed in", () => {
+    store.roleScopes = { admin: [Scope.ALL] };
+
+    expect(new AuthManager().hasScope(Scope.LIBRARY_READ)).toBe(false);
+  });
+});
+
+function createToken(jti: string, username: string): string {
+  const payload = btoa(
+    JSON.stringify({
+      sub: "user-id",
+      jti,
+      username,
+      role: username.endsWith("_guest") ? "guest" : "admin",
+    }),
+  )
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `header.${payload}.signature`;
+}
+
+function createQuizContext(participantIdentity: string) {
+  return {
+    connectionIdentity: "local:http://music-assistant:8095" as const,
+    participantIdentity,
+  };
+}

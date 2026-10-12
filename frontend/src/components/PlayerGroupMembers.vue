@@ -1,0 +1,300 @@
+<template>
+  <div v-if="candidateSections.length > 0">
+    <Separator v-if="showSeparator" class="my-2" />
+    <section
+      v-for="section in candidateSections"
+      :key="section.type"
+      class="player-group-section"
+    >
+      <p class="text-muted-foreground px-2 pt-1 pb-1 text-xs font-medium">
+        {{ section.translateLabel ? $t(section.label) : section.label }}
+      </p>
+      <div class="space-y-1">
+        <label
+          v-for="candidate in section.players"
+          :key="candidate.player_id"
+          :for="getCheckboxId(candidate)"
+          class="player-group-member flex min-h-9 items-center gap-2 rounded-md pr-2 transition-colors"
+          :class="{
+            'bg-primary/10': isGroupMember(candidate),
+            'hover:bg-accent/50 cursor-pointer': !isRequiredMember(candidate),
+            'cursor-not-allowed': isRequiredMember(candidate),
+          }"
+        >
+          <span
+            class="player-group-member-icon flex h-6 w-[30px] shrink-0 items-center justify-center"
+          >
+            <PlayerIcon
+              :icon="candidate.icon"
+              :size="18"
+              class="text-muted-foreground"
+              :class="{ 'opacity-50': candidate.powered === false }"
+            />
+          </span>
+          <span class="min-w-0 flex-1 truncate text-xs font-medium">
+            {{ getPlayerDisplayName(candidate) }}
+          </span>
+          <Checkbox
+            :id="getCheckboxId(candidate)"
+            :model-value="isGroupMember(candidate)"
+            :disabled="isRequiredMember(candidate)"
+            :aria-label="getPlayerDisplayName(candidate)"
+            class="border-muted-foreground/70 bg-background/70 size-5 border-2 shadow-sm"
+            @update:model-value="
+              updateGroupMember(candidate.player_id, $event === true)
+            "
+          />
+        </label>
+      </div>
+    </section>
+  </div>
+</template>
+
+<script setup lang="ts">
+import PlayerIcon from "@/components/PlayerIcon.vue";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Separator } from "@/components/ui/separator";
+import type { PlayerGroupFilter } from "@/helpers/player_group";
+import { requestGroupPlaybackConfirmation } from "@/helpers/player_group_playback";
+import {
+  canBeGroupMember,
+  getPlayerDisplayName,
+  groupMemberPickerVisible,
+  isScreenPlayer,
+} from "@/helpers/players";
+import { api } from "@/plugins/api";
+import {
+  type Player,
+  PlayerFeature,
+  PlayerType,
+} from "@/plugins/api/interfaces";
+import { computed, onUnmounted, ref } from "vue";
+
+const props = withDefaults(
+  defineProps<{
+    player: Player;
+    members: Player[];
+    filter?: PlayerGroupFilter;
+    groupHeading?: string;
+    showSeparator?: boolean;
+  }>(),
+  {
+    filter: "all",
+    groupHeading: undefined,
+    showSeparator: true,
+  },
+);
+
+const playersToAdd = ref<string[]>([]);
+const playersToRemove = ref<string[]>([]);
+let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+onUnmounted(flushPendingMemberUpdate);
+
+const candidates = computed(() => {
+  const players = [...props.members];
+  const playerIds = new Set(players.map((player) => player.player_id));
+  if (!props.player.supported_features.includes(PlayerFeature.SET_MEMBERS)) {
+    return sortPlayers(players);
+  }
+
+  for (const player of Object.values(api.players)) {
+    if (
+      player.player_id === props.player.player_id ||
+      playerIds.has(player.player_id) ||
+      !canGroupWithPlayer(player) ||
+      !player.available ||
+      !groupMemberPickerVisible(player) ||
+      !canBeGroupMember(player) ||
+      player.type === PlayerType.GROUP ||
+      (player.active_group && player.active_group !== props.player.player_id)
+    ) {
+      continue;
+    }
+    players.push(player);
+    playerIds.add(player.player_id);
+  }
+
+  return sortPlayers(players);
+});
+
+const candidateSections = computed(() => {
+  const groupedPlayers = props.groupHeading
+    ? candidates.value.filter(isGroupMember)
+    : [];
+  const filteredCandidates = candidates.value.filter(matchesFilter);
+  const availableCandidates = props.groupHeading
+    ? filteredCandidates.filter((player) => !isGroupMember(player))
+    : filteredCandidates;
+  const sections = [
+    {
+      type: "players",
+      label: "players",
+      translateLabel: true,
+      players: availableCandidates.filter(
+        (player) => player.type !== PlayerType.LIGHT && !isScreenPlayer(player),
+      ),
+    },
+    {
+      type: "lights",
+      label: "lights",
+      translateLabel: true,
+      players: availableCandidates.filter(
+        (player) => player.type === PlayerType.LIGHT,
+      ),
+    },
+    {
+      type: "screens",
+      label: "screens",
+      translateLabel: true,
+      players: availableCandidates.filter((player) => isScreenPlayer(player)),
+    },
+  ];
+  if (groupedPlayers.length > 0) {
+    sections.unshift({
+      type: "group",
+      label: props.groupHeading ?? getPlayerDisplayName(props.player),
+      translateLabel: false,
+      players: groupedPlayers,
+    });
+  }
+  return sections.filter((section) => section.players.length > 0);
+});
+
+function getCheckboxId(player: Player) {
+  return `group-member-${props.player.player_id}-${player.player_id}`;
+}
+
+function isGroupMember(player: Player) {
+  return (
+    player.player_id === props.player.player_id ||
+    props.player.group_members.includes(player.player_id)
+  );
+}
+
+function isRequiredMember(player: Player) {
+  if (
+    player.player_id === props.player.player_id &&
+    props.members.length <= 1
+  ) {
+    return true;
+  }
+  return (
+    props.player.static_group_members.includes(player.player_id) &&
+    isGroupMember(player)
+  );
+}
+
+function canGroupWithPlayer(player: Player) {
+  return props.player.can_group_with.includes(player.player_id);
+}
+
+function matchesFilter(player: Player) {
+  if (props.filter === "all") return true;
+  if (props.filter === "lights") return player.type === PlayerType.LIGHT;
+  if (props.filter === "screens") return isScreenPlayer(player);
+  return player.type !== PlayerType.LIGHT && !isScreenPlayer(player);
+}
+
+function sortPlayers(players: Player[]) {
+  return players.sort((left, right) =>
+    getPlayerDisplayName(left).localeCompare(
+      getPlayerDisplayName(right),
+      undefined,
+      {
+        sensitivity: "base",
+      },
+    ),
+  );
+}
+
+function updateGroupMember(playerId: string, selected: boolean) {
+  if (
+    !selected &&
+    playerId === props.player.player_id &&
+    requestGroupPlaybackConfirmation(props.player, "remove", () =>
+      applyGroupMemberUpdate(playerId, false),
+    )
+  ) {
+    flushPendingMemberUpdate();
+    return;
+  }
+  applyGroupMemberUpdate(playerId, selected);
+}
+
+function applyGroupMemberUpdate(playerId: string, selected: boolean) {
+  const parentPlayerId = props.player.player_id;
+
+  if (selected) {
+    playersToRemove.value = playersToRemove.value.filter(
+      (id) => id !== playerId,
+    );
+    if (!playersToAdd.value.includes(playerId)) {
+      playersToAdd.value.push(playerId);
+    }
+    if (!api.players[parentPlayerId].group_members.includes(playerId)) {
+      api.players[parentPlayerId].group_members.push(playerId);
+    }
+  } else {
+    playersToAdd.value = playersToAdd.value.filter((id) => id !== playerId);
+    if (!playersToRemove.value.includes(playerId)) {
+      playersToRemove.value.push(playerId);
+    }
+    const remainingPlayerIds = api.players[parentPlayerId].group_members.filter(
+      (id) => id !== playerId,
+    );
+    api.players[parentPlayerId].group_members =
+      props.player.type !== PlayerType.GROUP &&
+      remainingPlayerIds.length === 1 &&
+      remainingPlayerIds[0] === parentPlayerId
+        ? []
+        : remainingPlayerIds;
+  }
+
+  scheduleMemberUpdate();
+}
+
+function scheduleMemberUpdate() {
+  if (timeoutId) clearTimeout(timeoutId);
+  if (playersToAdd.value.length === 0 && playersToRemove.value.length === 0) {
+    return;
+  }
+
+  timeoutId = setTimeout(sendMemberUpdate, 500);
+}
+
+function sendMemberUpdate() {
+  const playerIdsToAdd = [...playersToAdd.value];
+  const playerIdsToRemove = [...playersToRemove.value];
+  playersToAdd.value = [];
+  playersToRemove.value = [];
+  timeoutId = undefined;
+
+  api
+    .playerCommandSetMembers(
+      props.player.player_id,
+      playerIdsToAdd.length ? playerIdsToAdd : undefined,
+      playerIdsToRemove.length ? playerIdsToRemove : undefined,
+    )
+    .catch(restorePlayer);
+}
+
+function flushPendingMemberUpdate() {
+  if (!timeoutId) return;
+  clearTimeout(timeoutId);
+  sendMemberUpdate();
+}
+
+async function restorePlayer() {
+  const restoredPlayer = await api.getPlayer(props.player.player_id);
+  for (const playerId of playersToAdd.value) {
+    if (!restoredPlayer.group_members.includes(playerId)) {
+      restoredPlayer.group_members.push(playerId);
+    }
+  }
+  restoredPlayer.group_members = restoredPlayer.group_members.filter(
+    (playerId) => !playersToRemove.value.includes(playerId),
+  );
+  api.players[props.player.player_id] = restoredPlayer;
+}
+</script>

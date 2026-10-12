@@ -1,0 +1,648 @@
+name: Publish releases
+
+# Builds and attaches package assets before publishing an immutable GitHub release
+# Publishes to PyPI and updates the server and client repositories afterward
+# Can be triggered manually with a version number or called by the auto-release workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g., 2.16.7) - Publishes to GitHub and PyPI, then updates downstream repos"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: "Version number (e.g., 2.16.7)"
+        required: true
+        type: string
+    secrets:
+      MUSIC_ASSISTANT_BOT_PRIVATE_KEY:
+        required: true
+      PYPI_TOKEN:
+        required: true
+
+permissions:
+  attestations: read
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  GITHUB_API_VERSION: "2026-03-10"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  verify-release-settings:
+    name: Verify Release Settings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release settings token
+        id: release_settings_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          permission-administration: read
+
+      - name: Verify bot token and immutable releases
+        run: |
+          set -euo pipefail
+
+          if [[ "$APP_SLUG" != "musicassistant-bot" ]]; then
+            echo "::error::GitHub App token belongs to ${APP_SLUG}, expected musicassistant-bot."
+            exit 1
+          fi
+
+          # This endpoint requires repository administration read access.
+          ENABLED=$(
+            gh api \
+              --method GET \
+              --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+              "repos/${GITHUB_REPOSITORY}/immutable-releases" \
+              --jq '.enabled'
+          )
+
+          if [[ "$ENABLED" != "true" ]]; then
+            echo "::error::Enable release immutability under Settings > General > Releases before publishing."
+            exit 1
+          fi
+        env:
+          APP_SLUG: ${{ steps.release_settings_token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.release_settings_token.outputs.token }}
+
+  test:
+    name: Run Tests
+    needs: verify-release-settings
+    uses: ./.github/workflows/test.yml
+
+  create-release:
+    name: Prepare Release
+    needs:
+      - test
+      - verify-release-settings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Create or reuse tag
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git show-ref --verify --quiet "refs/tags/${VERSION}"; then
+            echo "Reusing existing tag ${VERSION}"
+          else
+            git tag -a "$VERSION" -m "Release $VERSION"
+            git push origin "refs/tags/${VERSION}"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Check release state
+        id: release_state
+        run: |
+          set -euo pipefail
+
+          ERROR_FILE="${RUNNER_TEMP}/release-state-error"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${VERSION}" \
+            >/dev/null 2>"$ERROR_FILE"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "(HTTP 404)" "$ERROR_FILE"; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$ERROR_FILE" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Generate release notes with Release Drafter
+        id: release_drafter
+        if: steps.release_state.outputs.published != 'true'
+        uses: release-drafter/release-drafter@72967cdc98ddd3160f1fc3dff619de365e137dd0 # v7.9.0
+        with:
+          commitish: refs/tags/${{ inputs.version }} # codespell:ignore commitish
+          config-name: release-drafter.yml
+          dry-run: true
+          publish: false
+          prerelease: false
+          tag: ${{ inputs.version }}
+          version: ${{ inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or update draft release
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+
+          RELEASE_NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          printf "%s\n" "$RELEASE_BODY" > "$RELEASE_NOTES_FILE"
+
+          ERROR_FILE="${RUNNER_TEMP}/draft-release-error"
+          if IS_DRAFT=$(gh release view "$VERSION" --json isDraft --jq .isDraft \
+            2>"$ERROR_FILE"); then
+            if [[ "$IS_DRAFT" != "true" ]]; then
+              echo "::error::Release ${VERSION} was published while preparing its draft."
+              exit 1
+            fi
+
+            gh release edit "$VERSION" \
+              --draft \
+              --notes-file "$RELEASE_NOTES_FILE" \
+              --prerelease=false \
+              --verify-tag
+          elif grep -q "release not found" "$ERROR_FILE"; then
+            gh release create "$VERSION" \
+              --draft \
+              --notes-file "$RELEASE_NOTES_FILE" \
+              --verify-tag
+          else
+            cat "$ERROR_FILE" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_BODY: ${{ steps.release_drafter.outputs.body }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Finalize release notes
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+
+          RELEASE_BODY=$(gh release view "$VERSION" --json body --jq .body)
+
+          # Check if release body is empty or just says "No changes"
+          if [[ -z "$RELEASE_BODY" ]] || [[ "$RELEASE_BODY" =~ "No changes" ]]; then
+            echo "Release notes are empty or contain 'No changes'. Generating commit log..."
+
+            # Get the previous tag
+            PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || echo "")
+
+            if [[ -z "$PREV_TAG" ]]; then
+              # If no previous tag, get all commits
+              COMMIT_LOG=$(git log --pretty=format:"* %s (%h)" "$VERSION")
+            else
+              # Get commits between previous tag and current tag
+              COMMIT_LOG=$(git log --pretty=format:"* %s (%h)" "$PREV_TAG..${VERSION}")
+            fi
+
+            # Update release notes with commit log
+            RELEASE_NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+            {
+              echo "## Changes"
+              echo ""
+              echo "$COMMIT_LOG"
+            } > "$RELEASE_NOTES_FILE"
+
+            gh release edit "$VERSION" --notes-file "$RELEASE_NOTES_FILE"
+            echo "Release notes updated with commit log."
+          else
+            echo "Release notes already contain content from Release Drafter."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+  build-and-publish:
+    name: Build and Publish Release
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Check current release state
+        id: release_state
+        run: |
+          set -euo pipefail
+
+          ERROR_FILE="${RUNNER_TEMP}/release-state-error"
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${VERSION}" \
+            >/dev/null 2>"$ERROR_FILE"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "(HTTP 404)" "$ERROR_FILE"; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$ERROR_FILE" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        if: steps.release_state.outputs.published != 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        if: steps.release_state.outputs.published != 'true'
+        run: >-
+          pip install build tomli tomli-w
+
+      - name: Set Python project version
+        if: steps.release_state.outputs.published != 'true'
+        shell: python
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |-
+          import os
+
+          import tomli
+          import tomli_w
+
+          with open("pyproject.toml", "rb") as f:
+            pyproject = tomli.load(f)
+
+          pyproject["project"]["version"] = os.environ["VERSION"]
+
+          with open("pyproject.toml", "wb") as f:
+            tomli_w.dump(pyproject, f)
+
+      - name: Build package
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          python3 -m build
+
+      - name: Replace draft release assets
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          ASSETS=(dist/*.whl dist/*.tar.gz)
+          if (( ${#ASSETS[@]} == 0 )); then
+            echo "::error::The package build did not produce any release assets."
+            exit 1
+          fi
+
+          EXISTING_ASSETS=$(gh release view "$VERSION" --json assets --jq '.assets[].apiUrl')
+          while IFS= read -r ASSET_URL; do
+            if [[ -n "$ASSET_URL" ]]; then
+              gh api --method DELETE "${ASSET_URL#https://api.github.com/}"
+            fi
+          done <<< "$EXISTING_ASSETS"
+
+          gh release upload "$VERSION" "${ASSETS[@]}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Verify draft release assets
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          ASSETS=(dist/*.whl dist/*.tar.gz)
+          RELEASE_ASSETS=$(gh release view "$VERSION" --json assets)
+          RELEASE_ASSET_COUNT=$(jq '.assets | length' <<< "$RELEASE_ASSETS")
+
+          if (( RELEASE_ASSET_COUNT != ${#ASSETS[@]} )); then
+            echo "::error::The draft release contains an unexpected set of assets."
+            exit 1
+          fi
+
+          for ASSET_PATH in "${ASSETS[@]}"; do
+            ASSET_NAME=$(basename "$ASSET_PATH")
+            ASSET_SIZE=$(stat --format="%s" "$ASSET_PATH")
+            ASSET_DIGEST="sha256:$(sha256sum "$ASSET_PATH" | cut -d " " -f 1)"
+
+            if ! jq -e \
+              --arg name "$ASSET_NAME" \
+              --arg digest "$ASSET_DIGEST" \
+              --argjson size "$ASSET_SIZE" \
+              '.assets[] | select(
+                .name == $name
+                and .state == "uploaded"
+                and .size == $size
+                and .digest == $digest
+              )' <<< "$RELEASE_ASSETS" >/dev/null; then
+              echo "::error::Release asset ${ASSET_NAME} was not uploaded intact."
+              exit 1
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Create release settings token
+        id: release_settings_token
+        if: steps.release_state.outputs.published != 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          permission-administration: read
+
+      - name: Recheck immutable release setting
+        if: steps.release_state.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+
+          ENABLED=$(
+            gh api \
+              --method GET \
+              --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+              "repos/${GITHUB_REPOSITORY}/immutable-releases" \
+              --jq '.enabled'
+          )
+
+          if [[ "$ENABLED" != "true" ]]; then
+            echo "::error::Release immutability must remain enabled while publishing."
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ steps.release_settings_token.outputs.token }}
+
+      - name: Publish GitHub release
+        if: steps.release_state.outputs.published != 'true'
+        run: gh release edit "$VERSION" --draft=false --latest --verify-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Download published release assets
+        if: steps.release_state.outputs.published == 'true'
+        run: |
+          mkdir -p dist
+          gh release download "$VERSION" \
+            --dir dist \
+            --pattern "*.whl" \
+            --pattern "*.tar.gz"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Verify immutable release
+        run: |
+          set -euo pipefail
+
+          for ATTEMPT in {1..12}; do
+            if IS_IMMUTABLE=$(
+              gh release view "$VERSION" \
+                --json isDraft,isImmutable \
+                --jq 'select(.isDraft == false) | .isImmutable'
+            ); then
+              if [[ "$IS_IMMUTABLE" == "true" ]] && gh release verify "$VERSION"; then
+                exit 0
+              fi
+            fi
+
+            if (( ATTEMPT < 12 )); then
+              sleep 5
+            fi
+          done
+
+          echo "::error::GitHub did not verify release ${VERSION} as immutable."
+          exit 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+
+      - name: Publish release to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_TOKEN }}
+          skip-existing: ${{ steps.release_state.outputs.published }}
+
+  prepare-downstream-prs:
+    name: Prepare downstream PRs
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    outputs:
+      release_notes: ${{ steps.release_notes.outputs.notes }}
+    steps:
+      - name: Wait for PyPI availability
+        run: |
+          echo "Waiting 5 minutes for music-assistant-models==${{ inputs.version }} to propagate on PyPI..."
+          sleep 300
+          echo "✅ Wait complete, proceeding with downstream PRs"
+
+      - name: Get release notes
+        id: release_notes
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Get the release notes from the models release
+          RELEASE_DATA=$(gh release view "$VERSION" --repo music-assistant/models --json body)
+
+          RELEASE_NOTES=$(echo "$RELEASE_DATA" | jq -r '.body')
+
+          # Fix relative links in release notes to point to models repo
+          # Convert models#123 or #123 to [#123](https://github.com/music-assistant/models/pull/123)
+          RELEASE_NOTES=$(echo "$RELEASE_NOTES" | sed -E 's/(^|[^[])(models)?#([0-9]+)/\1[#\3](https:\/\/github.com\/music-assistant\/models\/pull\/\3)/g')
+
+          # Set multiline output
+          {
+            echo 'notes<<EOF'
+            echo "$RELEASE_NOTES"
+            echo EOF
+          } >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  server-repo-pr:
+    name: Server repo PR
+    needs: prepare-downstream-prs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine server target branch
+        id: target
+        run: |
+          # Stable patch builds (PEP 440 .post releases) bump the server `stable`
+          # branch; regular releases bump the default (dev) branch.
+          if [[ "${{ inputs.version }}" == *.post* ]]; then
+            echo "branch=stable" >> $GITHUB_OUTPUT
+          else
+            echo "branch=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create server repository token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: server
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout server repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: music-assistant/server
+          ref: ${{ steps.target.outputs.branch }}
+          token: ${{ steps.app_token.outputs.token }}
+          path: .
+
+      - name: Update models version
+        run: |
+          VERSION="${{ inputs.version }}"
+
+          # Update pyproject.toml
+          sed -i.bak "s/music-assistant-models==.*/music-assistant-models==$VERSION\",/" pyproject.toml
+
+          # Update requirements_all.txt
+          sed -i.bak "s/music-assistant-models==.*/music-assistant-models==$VERSION/" requirements_all.txt
+
+          # Remove backup files
+          rm -f pyproject.toml.bak requirements_all.txt.bak
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app_token.outputs.token }}
+          commit-message: "⬆️ Update music-assistant-models to ${{ inputs.version }}"
+          branch: "auto-update-models-${{ inputs.version }}"
+          delete-branch: true
+          sign-commits: true
+          title: "⬆️ Update music-assistant-models to ${{ inputs.version }}"
+          base: ${{ steps.target.outputs.branch }}
+          body: |
+            Update music-assistant-models to version [${{ inputs.version }}](https://github.com/music-assistant/models/releases/tag/${{ inputs.version }})
+
+            ${{ needs.prepare-downstream-prs.outputs.release_notes }}
+
+          labels: |
+            dependencies
+
+  client-repo-pr:
+    name: Client repo PR
+    needs: prepare-downstream-prs
+    runs-on: ubuntu-latest
+    # the client tracks dev; stable patch builds (.post releases) must not
+    # downgrade its models pin
+    if: ${{ !contains(inputs.version, '.post') }}
+    steps:
+      - name: Create client repository token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: client
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout client repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: music-assistant/client
+          token: ${{ steps.app_token.outputs.token }}
+          path: .
+
+      - name: Update models version
+        shell: python
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |-
+          import os
+          import re
+
+          VERSION = os.environ["VERSION"]
+
+          # The client depends on the underscore-named package
+          # (music_assistant_models), not the hyphenated PyPI project name.
+          # newline="" keeps existing line endings untouched so only the
+          # version substring changes.
+          with open("pyproject.toml", encoding="utf-8", newline="") as f:
+            content = f.read()
+
+          pattern = re.compile(r"music_assistant_models==[^\"']+")
+          content, count = pattern.subn(
+            lambda _match: f"music_assistant_models=={VERSION}",
+            content,
+          )
+
+          if count != 1:
+            raise SystemExit(
+              f"Expected exactly one music_assistant_models pin in pyproject.toml, found {count}"
+            )
+
+          with open("pyproject.toml", "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app_token.outputs.token }}
+          commit-message: "⬆️ Update music-assistant-models to ${{ inputs.version }}"
+          branch: "auto-update-models-${{ inputs.version }}"
+          delete-branch: true
+          sign-commits: true
+          title: "⬆️ Update music-assistant-models to ${{ inputs.version }}"
+          body: |
+            Update music-assistant-models to version [${{ inputs.version }}](https://github.com/music-assistant/models/releases/tag/${{ inputs.version }})
+
+            ${{ needs.prepare-downstream-prs.outputs.release_notes }}
+
+          labels: |
+            dependencies
+
+      - name: Close superseded bump PRs
+        if: steps.create_pr.outputs.pull-request-number
+        run: |
+          set -euo pipefail
+
+          # The prefix must match the `branch` input of the step above.
+          OPEN_BUMPS=$(
+            gh pr list \
+              --repo music-assistant/client \
+              --state open \
+              --limit 100 \
+              --json number,headRefName \
+              --jq '.[]
+                | select(.headRefName | startswith("auto-update-models-"))
+                | [.number, (.headRefName | ltrimstr("auto-update-models-"))]
+                | @tsv'
+          )
+
+          if [[ -z "$OPEN_BUMPS" ]]; then
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r NUMBER BUMP_VERSION; do
+            if [[ "$NUMBER" == "$NEW_PR" ]]; then
+              continue
+            fi
+
+            # Keep bumps to a newer version so an out-of-order release cannot close them.
+            OLDEST=$(printf "%s\n%s\n" "$BUMP_VERSION" "$VERSION" | sort -V | head -n1)
+            if [[ "$OLDEST" != "$BUMP_VERSION" ]]; then
+              continue
+            fi
+
+            gh pr close "$NUMBER" \
+              --repo music-assistant/client \
+              --delete-branch \
+              --comment "Superseded by #${NEW_PR}, which updates music-assistant-models to ${VERSION}."
+          done <<< "$OPEN_BUMPS"
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          NEW_PR: ${{ steps.create_pr.outputs.pull-request-number }}
+          VERSION: ${{ inputs.version }}

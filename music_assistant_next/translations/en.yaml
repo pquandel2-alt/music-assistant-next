@@ -1,0 +1,9 @@
+configuration:
+  log_level:
+    name: Log level
+    description: Controls the verbosity of server logs.
+  safe_mode:
+    name: Safe mode
+    description: Start without loading providers for troubleshooting.
+network:
+  8095/tcp: Music Assistant Next web interface and API

@@ -1,0 +1,658 @@
+<template>
+  <v-form
+    v-if="entries"
+    ref="form"
+    v-model="valid"
+    :disabled="disabled"
+    :class="{ 'floating-save-clearance': showSaveAction && !inlineSave }"
+  >
+    <Card v-if="hasOptions" class="gap-0 py-0">
+      <CardHeader
+        v-if="!hideHeader"
+        class="flex flex-wrap items-center gap-3 px-6 py-4 [.border-b]:pb-4"
+        :class="{ 'border-b': hasVisibleSections }"
+      >
+        <CardTitle>{{ $t("settings.options") }}</CardTitle>
+        <AdvancedSettingsToggle
+          v-if="showAdvancedToggle"
+          :show-advanced-settings="showAdvancedSettings"
+          test-id="config-advanced-settings"
+          @update:show-advanced-settings="setShowAdvancedSettings"
+        />
+      </CardHeader>
+      <CardContent v-if="hasVisibleSections" class="px-6 pb-5">
+        <!-- Generic settings section -->
+        <section
+          v-for="panel of regularPanels.filter(
+            (p) => p === 'generic' && entriesForCategory(p).length > 0,
+          )"
+          :key="panel"
+          class="pt-7 first:pt-5"
+        >
+          <h4
+            class="mb-5 flex items-center gap-3 text-xs font-medium tracking-wider text-primary uppercase"
+          >
+            <span>{{ getCategoryTranslation(panel) }}</span>
+            <span class="h-px flex-1 bg-border"></span>
+          </h4>
+          <ConfigEntryRow
+            v-for="conf_entry of entriesForCategory(panel)"
+            :key="conf_entry.key"
+            :conf-entry="conf_entry"
+            :show-password-values="showPasswordValues"
+            :disabled="isRowDisabled(conf_entry)"
+            :provider-domain="providerDomain"
+            @update:value="onValueUpdate(conf_entry, $event)"
+            @toggle-password="showPasswordValues = !showPasswordValues"
+            @action="onEntryAction(conf_entry)"
+            @set-entry-value="onEntryValueSet"
+          />
+        </section>
+
+        <!-- No provider-domain: that is only set for a provider config, which carries no protocol
+             categories. No set-entry-value handler: its only emitter is the Home Assistant entity
+             picker, which sits with the player controls on the parent player. -->
+        <ProtocolConfigSection
+          :entries="entries || []"
+          :protocol-panels="protocolPanels"
+          :visible-entries-by-category="visibleEntriesByCategory"
+          :show-password-values="showPasswordValues"
+          :is-disabled="isRowDisabled"
+          :output-protocols="outputProtocols"
+          @update:value="onValueUpdate"
+          @action="onEntryAction"
+          @toggle-password="showPasswordValues = !showPasswordValues"
+        />
+
+        <!-- Other regular settings sections -->
+        <section
+          v-for="panel of regularPanels.filter(
+            (p) => p !== 'generic' && entriesForCategory(p).length > 0,
+          )"
+          :key="panel"
+          class="pt-7 first:pt-5"
+        >
+          <h4
+            class="mb-5 flex items-center gap-3 text-xs font-medium tracking-wider text-primary uppercase"
+          >
+            <span>{{ getCategoryTranslation(panel) }}</span>
+            <span class="h-px flex-1 bg-border"></span>
+          </h4>
+          <ConfigEntryRow
+            v-for="conf_entry of entriesForCategory(panel)"
+            :key="conf_entry.key"
+            :conf-entry="conf_entry"
+            :show-password-values="showPasswordValues"
+            :disabled="isRowDisabled(conf_entry)"
+            :provider-domain="providerDomain"
+            @update:value="onValueUpdate(conf_entry, $event)"
+            @toggle-password="showPasswordValues = !showPasswordValues"
+            @action="onEntryAction(conf_entry)"
+            @set-entry-value="onEntryValueSet"
+          />
+        </section>
+      </CardContent>
+    </Card>
+
+    <div
+      v-if="showSaveAction"
+      :class="
+        inlineSave
+          ? 'mt-4 flex justify-end'
+          : [
+              'floating-save',
+              {
+                'floating-save--mobile': store.mobileLayout,
+                'floating-save--frameless': store.frameless,
+              },
+            ]
+      "
+    >
+      <Button
+        data-testid="config-save"
+        type="button"
+        size="lg"
+        :class="{ 'shadow-lg': !inlineSave }"
+        :disabled="!requiredValuesPresent || !hasUnsavedChanges"
+        @click="submit"
+      >
+        <Save class="size-4" />
+        {{ $t("settings.save") }}
+      </Button>
+    </div>
+  </v-form>
+  <!-- Unsaved changes confirmation dialog -->
+  <!-- any way out of this dialog has to answer the navigation it is holding -->
+  <v-dialog
+    :model-value="showUnsavedDialog"
+    max-width="400"
+    persistent
+    @update:model-value="cancelDiscard"
+  >
+    <v-card>
+      <v-card-title>{{ $t("settings.unsaved_changes") }}</v-card-title>
+      <v-card-text>{{ $t("settings.unsaved_changes_message") }}</v-card-text>
+      <v-card-actions>
+        <v-spacer />
+        <v-btn data-testid="config-stay" variant="text" @click="cancelDiscard">
+          {{ $t("settings.stay") }}
+        </v-btn>
+        <v-btn
+          data-testid="config-discard"
+          color="warning"
+          variant="flat"
+          @click="confirmDiscard"
+        >
+          {{ $t("settings.discard") }}
+        </v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
+</template>
+
+<script setup lang="ts">
+import {
+  allRequiredValuesPresent,
+  ConfigEntryUI,
+  hasAdvancedEntries,
+  isEntryDisabled,
+  isInjected,
+  NON_INTERACTIVE_ENTRY_TYPES,
+  VALUELESS_ENTRY_TYPES,
+} from "@/helpers/config_entry_ui";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  ConfigEntryType,
+  ConfigValueType,
+  OutputProtocol,
+  SECURE_STRING_SUBSTITUTE,
+} from "@/plugins/api/interfaces";
+import { $t } from "@/plugins/i18n";
+import { store } from "@/plugins/store";
+import {
+  setUserPreference,
+  useUserPreferences,
+} from "@/composables/userPreferences";
+import { Save } from "@lucide/vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeRouteLeave, useRouter } from "vue-router";
+import AdvancedSettingsToggle from "./AdvancedSettingsToggle.vue";
+import ConfigEntryRow from "./ConfigEntryRow.vue";
+import ProtocolConfigSection from "./ProtocolConfigSection.vue";
+
+const ADVANCED_SETTINGS_PREFERENCE = "settings.showAdvancedSettings";
+
+const router = useRouter();
+const showUnsavedDialog = ref(false);
+const allowNavigation = ref(false);
+// answers the navigation the guard is holding; set only while one waits on the
+// unsaved-changes dialog
+let heldNavigation: ((discard: boolean) => void) | undefined;
+
+export interface Props {
+  configEntries: ConfigEntryUI[];
+  disabled: boolean;
+  // Output protocols of the player being configured; drives derived-transport labelling
+  // in the protocol section. Omitted for provider/core configs.
+  outputProtocols?: OutputProtocol[];
+  // Domain of the provider being configured; lets a field recognise the entries of the
+  // provider it belongs to. Omitted for player/core configs.
+  providerDomain?: string;
+  // Keep the Save button in the flow of the form instead of floating over the page:
+  // inside a dialog, a fixed position is measured from the dialog rather than the screen.
+  inlineSave?: boolean;
+  // Leave out the Options header and its advanced toggle, for a host that names the form and
+  // decides which of its entries show.
+  hideHeader?: boolean;
+  // Whether the advanced entries show, for a host that decides it; without one, the choice
+  // the user made with the advanced toggle applies.
+  showAdvancedSettings?: boolean;
+}
+
+const emit = defineEmits<{
+  (e: "submit", values: Record<string, ConfigValueType>): void;
+  (
+    e: "action",
+    action: string,
+    values: Record<string, ConfigValueType>,
+    immediateApply: boolean,
+  ): void;
+  (e: "immediateApply", values: Record<string, ConfigValueType>): void;
+}>();
+
+// global refs
+const entries = ref<ConfigEntryUI[]>();
+const valid = ref(false);
+const form = ref<InstanceType<typeof import("vuetify/components").VForm>>();
+const showPasswordValues = ref(false);
+const oldValues = ref<Record<string, ConfigValueType>>({});
+const oldValuesInitialized = ref(false);
+
+// props
+const props = withDefaults(defineProps<Props>(), {
+  outputProtocols: undefined,
+  providerDomain: undefined,
+  // left unset rather than cast to false, so the user's own choice can apply
+  showAdvancedSettings: undefined,
+});
+
+// one choice for every settings form, kept on the user's profile
+const advancedSettingsPreference = useUserPreferences().getPreference(
+  ADVANCED_SETTINGS_PREFERENCE,
+  false,
+);
+// what was chosen here, which holds for this form even when the profile could not
+// be updated
+const advancedSettingsChoice = ref<boolean>();
+const showAdvancedSettings = computed(
+  () =>
+    props.showAdvancedSettings ??
+    advancedSettingsChoice.value ??
+    advancedSettingsPreference.value,
+);
+
+// computed props
+const panels = computed(() => {
+  // determine all unique categories from the config entries
+  const allCategories = new Set(
+    entries
+      .value!.map((x) => x.category)
+      .filter(
+        (x) =>
+          ![
+            "preferences",
+            "display_settings",
+            "generic",
+            "advanced",
+            "protocol_general",
+          ].includes(x),
+      ),
+  );
+  // ensure preferences, display_settings, and generic are always first
+  // advanced category is deprecated - advanced settings are now distributed across categories
+  // protocol_general is handled separately in the protocol section
+  return ["preferences", "display_settings", "generic", ...allCategories];
+});
+
+const regularPanels = computed(() => {
+  return panels.value.filter((p) => !isProtocolRelated(p));
+});
+
+const protocolPanels = computed(() => {
+  return panels.value.filter((p) => isProtocolCategory(p));
+});
+
+// a disabled form cannot be edited, so there is nothing to reveal; without the
+// header there is no place for the toggle, and a host that decides what shows
+// leaves it nothing to change
+const showAdvancedToggle = computed(
+  () =>
+    !props.hideHeader &&
+    !props.disabled &&
+    props.showAdvancedSettings === undefined &&
+    hasAdvancedEntries(entries.value || []),
+);
+
+const hasVisibleSections = computed(
+  () =>
+    protocolPanels.value.length > 0 ||
+    Object.keys(visibleEntriesByCategory.value).length > 0,
+);
+
+// what the save button can store: a visible entry holding a value, or the enable
+// switch of an optional protocol; actions and labels alone leave nothing to save
+const hasEditableEntries = computed(
+  () =>
+    Object.values(visibleEntriesByCategory.value)
+      .flat()
+      .some(
+        (entry) =>
+          !VALUELESS_ENTRY_TYPES.includes(entry.type) && !isInjected(entry),
+      ) ||
+    (entries.value ?? []).some((entry) =>
+      entry.key.endsWith("||protocol||enabled"),
+    ),
+);
+
+// with nothing editable in view, only unsaved edits still need saving
+const showSaveAction = computed(
+  () =>
+    !props.disabled && (hasEditableEntries.value || hasUnsavedChanges.value),
+);
+
+// a config with nothing to show or reveal leaves out the card altogether
+const hasOptions = computed(
+  () => showAdvancedToggle.value || hasVisibleSections.value,
+);
+
+const requiredValuesPresent = computed(() =>
+  entries.value ? allRequiredValuesPresent(entries.value) : false,
+);
+
+const hasUnsavedChanges = computed(() => {
+  if (!entries.value) return false;
+  for (const entry of entries.value) {
+    // Skip non-value entry types
+    if (VALUELESS_ENTRY_TYPES.includes(entry.type) || isInjected(entry)) {
+      continue;
+    }
+    // Skip secure strings that haven't been modified (still showing substitute)
+    if (
+      entry.type == ConfigEntryType.SECURE_STRING &&
+      entry.value == SECURE_STRING_SUBSTITUTE
+    ) {
+      continue;
+    }
+    const oldValue = oldValues.value[entry.key];
+    const currentValue = entry.value;
+    // Compare values (handle arrays and objects)
+    if (JSON.stringify(oldValue) !== JSON.stringify(currentValue)) {
+      return true;
+    }
+  }
+  return false;
+});
+
+// Helper functions for protocol categories
+const isProtocolCategory = function (category: string): boolean {
+  return category.startsWith("protocol_");
+};
+
+const isProtocolRelated = function (category: string): boolean {
+  return category === "protocol_general" || isProtocolCategory(category);
+};
+
+/**
+ * A value as `oldValues` keeps it: an object is copied, so editing the entry
+ * afterwards does not quietly change what it is compared against.
+ */
+const snapshot = function (value: ConfigValueType): ConfigValueType {
+  return typeof value === "object" && value !== null
+    ? JSON.parse(JSON.stringify(value))
+    : value;
+};
+
+// watchers
+watch(
+  () => props.configEntries,
+  (val) => {
+    entries.value = [];
+    // Only capture oldValues on the FIRST load, not on subsequent updates from actions.
+    // This ensures that action-triggered changes (like OAuth tokens being set) are
+    // still detected as unsaved changes that need to be saved.
+    const shouldCaptureOldValues = !oldValuesInitialized.value;
+    if (shouldCaptureOldValues) {
+      oldValues.value = {};
+    }
+    for (const entry of val || []) {
+      // handle missing values (undefined or null)
+      if (entry.value == undefined || entry.value == null)
+        entry.value = entry.default_value;
+      // Store the initial value AFTER applying defaults (deep clone for arrays/objects)
+      // Also update oldValues for immediate_apply entries on subsequent updates,
+      // since their values are already saved to the backend.
+      if (shouldCaptureOldValues || entry.immediate_apply) {
+        oldValues.value[entry.key] = snapshot(entry.value);
+      }
+      entries.value.push(entry);
+    }
+    oldValuesInitialized.value = true;
+  },
+  { immediate: true },
+);
+
+// methods
+const validate = async function () {
+  const { valid } = await form.value!.validate();
+  return valid;
+};
+const submit = async function () {
+  // submit button is pressed
+  if (await validate()) {
+    allowNavigation.value = true;
+    emit("submit", getCurrentValues());
+  }
+};
+const action = async function (action: string, immediateApply: boolean) {
+  // call config entries action
+  emit("action", action, getCurrentValues(), immediateApply);
+};
+
+const onValueUpdate = function (entry: ConfigEntryUI, value: ConfigValueType) {
+  entry.value = value;
+  // If immediate_apply is set, emit the value change immediately
+  // and update oldValues so the form doesn't show as "unsaved"
+  if (entry.immediate_apply) {
+    emit("immediateApply", { [entry.key]: value });
+    oldValues.value[entry.key] = snapshot(value);
+  }
+};
+// a field can fill in another entry of the same form, e.g. the Home Assistant entity
+// picker setting the player control it sits under
+const onEntryValueSet = function (
+  key: string,
+  value: ConfigValueType,
+  label?: string,
+) {
+  const entry = entries.value?.find((e) => e.key === key);
+  if (!entry) return;
+  // the server does not know of the value yet, so carry the name the field gave us or
+  // the field would read back the bare id until the config is fetched again
+  if (label && !entry.options.some((option) => option.value === value)) {
+    entry.options = [...entry.options, { title: label, value }];
+  }
+  onValueUpdate(entry, value);
+};
+
+const onEntryAction = function (entry: ConfigEntryUI) {
+  action(entry.action || entry.key, !!entry.immediate_apply);
+};
+
+const setShowAdvancedSettings = function (show: boolean) {
+  advancedSettingsChoice.value = show;
+  void setUserPreference(ADVANCED_SETTINGS_PREFERENCE, show);
+};
+
+const resetToDefaults = function () {
+  if (!entries.value) return;
+  for (const entry of entries.value) {
+    // a hidden entry carries state the user never sees, such as housekeeping the
+    // server keeps in the config, so a reset leaves it as it is
+    if (entry.hidden) continue;
+    entry.value = entry.default_value;
+  }
+};
+
+/**
+ * Reports a save that did not land, so the values stay guarded and leaving the
+ * screen asks about them again.
+ */
+const saveFailed = function () {
+  allowNavigation.value = false;
+};
+
+/**
+ * Reports a save that landed, for a form that stays on screen afterwards: the
+ * values that went to the server are what is stored now, so they stop counting
+ * as unsaved. Only those — the form stays open while a save is on its way, so
+ * anything typed in the meantime is still an edit nobody saved. Leaving guards
+ * the values again as well: `submit` let the save through, and the next edit
+ * has to be asked about like any other.
+ */
+const saveSucceeded = function (values: Record<string, ConfigValueType>) {
+  for (const [key, value] of Object.entries(values)) {
+    oldValues.value[key] = snapshot(value);
+  }
+  allowNavigation.value = false;
+};
+
+/**
+ * Stops guarding the pending edits, for when what they belong to is gone and
+ * there is nothing left to save them to.
+ */
+const discardChanges = function () {
+  allowNavigation.value = true;
+};
+
+defineExpose({
+  resetToDefaults,
+  saveFailed,
+  saveSucceeded,
+  discardChanges,
+  hasUnsavedChanges,
+  submit,
+});
+
+const confirmDiscard = function () {
+  showUnsavedDialog.value = false;
+  // a redirect has the router run the leave guards of the resumed navigation a
+  // second time, and it must not ask again
+  allowNavigation.value = true;
+  releaseNavigation(true);
+};
+
+const cancelDiscard = function () {
+  showUnsavedDialog.value = false;
+  releaseNavigation(false);
+};
+
+// Navigation guard for route changes
+onBeforeRouteLeave(() => {
+  if (allowNavigation.value || !hasUnsavedChanges.value) return true;
+  // one is already waiting for an answer: turn this one away rather than hold
+  // both, or the history ends up out of step with the page on screen
+  if (heldNavigation) return false;
+  // holding it, rather than cancelling it, is what lets discarding carry on to
+  // the very page the user asked for
+  showUnsavedDialog.value = true;
+  return new Promise<boolean>((resolve) => {
+    heldNavigation = resolve;
+  });
+});
+
+// Handle browser back/refresh
+const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+  if (hasUnsavedChanges.value) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+};
+
+onBeforeUnmount(() => {
+  window.removeEventListener("beforeunload", handleBeforeUnload);
+});
+
+// Add listener when component mounts
+window.addEventListener("beforeunload", handleBeforeUnload);
+
+const releaseNavigation = function (discard: boolean) {
+  heldNavigation?.(discard);
+  heldNavigation = undefined;
+};
+
+const isDisabled = function (entry: ConfigEntryUI) {
+  return isEntryDisabled(entry, entries.value || []);
+};
+
+// the form-wide disabled state has to be handed to every field: v-form only reaches
+// Vuetify's own inputs, so the number field beside a slider would stay editable
+const isRowDisabled = function (entry: ConfigEntryUI) {
+  return props.disabled || isDisabled(entry);
+};
+
+const isVisible = function (entry: ConfigEntryUI) {
+  if (entry.hidden) return false;
+  // an unmet dependency can only be expressed by hiding these types
+  return !(
+    NON_INTERACTIVE_ENTRY_TYPES.includes(entry.type) && isDisabled(entry)
+  );
+};
+
+const visibleEntriesByCategory = computed(() => {
+  const result: Record<string, ConfigEntryUI[]> = {};
+  if (!entries.value) return result;
+
+  for (const entry of entries.value) {
+    if (!isVisible(entry)) continue;
+    // Always skip 'enabled' and 'name' entries - they're either handled via dedicated props
+    // or shouldn't be shown (e.g., when adding a new provider)
+    if (entry.key === "enabled" || entry.key === "name") continue;
+    // Skip protocol-specific enabled entries (they're shown in the header)
+    if (entry.key.includes("||protocol||enabled")) continue;
+    // Skip advanced entries if advanced settings are not shown
+    if (entry.advanced && !showAdvancedSettings.value) continue;
+    const category = entry.category || "generic";
+    if (!result[category]) {
+      result[category] = [];
+    }
+    result[category].push(entry);
+  }
+  return result;
+});
+
+const entriesForCategory = function (category: string) {
+  return visibleEntriesByCategory.value[category] || [];
+};
+
+const getCategoryTranslation = function (category: string) {
+  // The display name comes from `category_label`: resolved server-side for server entries, and
+  // set at construction for frontend-only entries. Read it from any entry in this category.
+  const entriesInCategory = entriesForCategory(category);
+  let entryWithTranslation: ConfigEntryUI | undefined = entriesInCategory[0];
+  if (!entryWithTranslation && isProtocolCategory(category) && entries.value) {
+    entryWithTranslation = entries.value.find((e) => e.category === category);
+  }
+  return entryWithTranslation?.category_label || category;
+};
+
+const getCurrentValues = function () {
+  const values: Record<string, ConfigValueType> = {};
+  // Iterate over props.configEntries to include all entries
+  // Note: entries.value contains the same object references as props.configEntries
+  // (pushed in the watch), so user modifications via the form update both
+  for (const entry of props.configEntries!) {
+    if (isInjected(entry)) continue;
+    let value = entry.value;
+    // filter out undefined values
+    if (value == undefined) value = null;
+    // filter out obfuscated strings (only skip if it's the substitute placeholder)
+    if (
+      entry.type == ConfigEntryType.SECURE_STRING &&
+      value == SECURE_STRING_SUBSTITUTE
+    ) {
+      continue;
+    }
+    values[entry.key] = value;
+  }
+  return values;
+};
+</script>
+
+<style scoped>
+/* Lets the last row scroll clear of the floating Save button. */
+.floating-save-clearance {
+  padding-bottom: 56px;
+}
+
+.floating-save {
+  position: fixed;
+  /* A landscape phone is wide enough to count as the desktop layout, so this
+     rule is what keeps the button clear of a side cutout. */
+  right: calc(24px + var(--device-inset-right));
+  bottom: calc(var(--v-layout-bottom, var(--player-bar-height)) + 16px);
+  z-index: 20;
+}
+
+.floating-save--mobile {
+  /* Takes the floating player card's inset, so the two right edges line up. */
+  right: calc(var(--mobile-player-inset-x) + var(--device-inset-right));
+  bottom: calc(var(--bottom-bars-height) + 16px);
+  /* Above the player scrim, below the mobile bars. */
+  z-index: 1000;
+}
+
+.floating-save--frameless {
+  bottom: 16px;
+}
+</style>

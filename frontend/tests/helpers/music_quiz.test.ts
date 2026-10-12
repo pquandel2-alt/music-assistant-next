@@ -1,0 +1,222 @@
+import {
+  clearStoredMusicQuizPlayerId,
+  getStoredMusicQuizPlayerId,
+  getStoredMusicQuizPlayerName,
+  hasSeenMusicQuizLanding,
+  isNoActiveGameError,
+  isUnknownPlayerError,
+  storeMusicQuizLandingSeen,
+  storeMusicQuizPlayerId,
+  storeMusicQuizPlayerName,
+} from "@/helpers/music_quiz";
+import { ApiCommandError } from "@/plugins/api/errors";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+describe("Music Quiz error detection", () => {
+  it("detects the no-game error regardless of the locale of the details", () => {
+    expect(
+      isNoActiveGameError(
+        new ApiCommandError("There is no active Music Quiz game.", 1001),
+      ),
+    ).toBe(true);
+    expect(
+      isNoActiveGameError(
+        new ApiCommandError("Er is geen actief Music Quiz spel.", 1001),
+      ),
+    ).toBe(true);
+  });
+
+  it("detects the unknown player error", () => {
+    expect(
+      isUnknownPlayerError(new ApiCommandError("Speler niet gevonden.", 1009)),
+    ).toBe(true);
+    expect(
+      isNoActiveGameError(new ApiCommandError("Speler niet gevonden.", 1009)),
+    ).toBe(false);
+  });
+
+  it("ignores other errors, including ones that merely mention no active game", () => {
+    expect(
+      isNoActiveGameError(new ApiCommandError("There is no active game", 1007)),
+    ).toBe(false);
+    expect(isNoActiveGameError("There is no active Music Quiz game.")).toBe(
+      false,
+    );
+    expect(isNoActiveGameError(new Error("boom"))).toBe(false);
+    expect(isNoActiveGameError(undefined)).toBe(false);
+  });
+});
+
+describe("Music Quiz guest name storage", () => {
+  const storedValues = new Map<string, string>();
+
+  beforeEach(() => {
+    storedValues.clear();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storedValues.get(key) ?? null,
+      setItem: (key: string, value: string) => storedValues.set(key, value),
+      removeItem: (key: string) => storedValues.delete(key),
+    });
+    vi.stubGlobal("sessionStorage", createStorage());
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("stores and returns a trimmed display name for the current tab", () => {
+    storeMusicQuizPlayerName("  Player One  ", PARTICIPANT_CONTEXT);
+
+    expect(getStoredMusicQuizPlayerName(PARTICIPANT_CONTEXT)).toBe(
+      "Player One",
+    );
+    expect(
+      JSON.parse(sessionStorage.getItem("music_quiz_player_name") || "{}"),
+    ).toMatchObject({
+      ...PARTICIPANT_CONTEXT,
+      playerName: "Player One",
+    });
+    expect(localStorage.getItem("music_quiz_player_name")).toBeNull();
+  });
+
+  it("ignores blank display names", () => {
+    storeMusicQuizPlayerName("   ", PARTICIPANT_CONTEXT);
+
+    expect(getStoredMusicQuizPlayerName(PARTICIPANT_CONTEXT)).toBe("");
+    expect(sessionStorage.getItem("music_quiz_player_name")).toBeNull();
+  });
+
+  it("discards a legacy shared display name", () => {
+    localStorage.setItem("music_quiz_player_name", "Legacy Player");
+
+    expect(getStoredMusicQuizPlayerName(PARTICIPANT_CONTEXT)).toBe("");
+    expect(sessionStorage.getItem("music_quiz_player_name")).toBeNull();
+    expect(localStorage.getItem("music_quiz_player_name")).toBeNull();
+  });
+
+  it("keeps the private player credential in the current tab across reloads", () => {
+    storeMusicQuizPlayerId("private-player-id", PARTICIPANT_CONTEXT);
+
+    expect(getStoredMusicQuizPlayerId(PARTICIPANT_CONTEXT)).toBe(
+      "private-player-id",
+    );
+    expect(
+      JSON.parse(sessionStorage.getItem("music_quiz_player_id") || "{}"),
+    ).toMatchObject({
+      ...PARTICIPANT_CONTEXT,
+      playerId: "private-player-id",
+    });
+    expect(localStorage.getItem("music_quiz_player_id")).toBeNull();
+
+    clearStoredMusicQuizPlayerId();
+    expect(getStoredMusicQuizPlayerId(PARTICIPANT_CONTEXT)).toBeNull();
+  });
+
+  it("does not share participant state with another tab", () => {
+    const firstTab = createStorage();
+    const secondTab = createStorage();
+    vi.stubGlobal("sessionStorage", firstTab);
+    storeMusicQuizPlayerId("first-tab-player", PARTICIPANT_CONTEXT);
+    storeMusicQuizPlayerName("First Tab", PARTICIPANT_CONTEXT);
+
+    vi.stubGlobal("sessionStorage", secondTab);
+    expect(getStoredMusicQuizPlayerId(PARTICIPANT_CONTEXT)).toBeNull();
+    expect(getStoredMusicQuizPlayerName(PARTICIPANT_CONTEXT)).toBe("");
+
+    vi.stubGlobal("sessionStorage", firstTab);
+    expect(getStoredMusicQuizPlayerId(PARTICIPANT_CONTEXT)).toBe(
+      "first-tab-player",
+    );
+    expect(getStoredMusicQuizPlayerName(PARTICIPANT_CONTEXT)).toBe("First Tab");
+  });
+
+  it("does not reuse participant state on another server", () => {
+    storeMusicQuizPlayerId("private-player-id", PARTICIPANT_CONTEXT);
+    storeMusicQuizPlayerName("Player", PARTICIPANT_CONTEXT);
+    const otherServerContext = {
+      ...PARTICIPANT_CONTEXT,
+      connectionIdentity: "local:http://other-server:8095" as const,
+    };
+
+    expect(getStoredMusicQuizPlayerId(otherServerContext)).toBeNull();
+    expect(getStoredMusicQuizPlayerName(otherServerContext)).toBe("");
+  });
+
+  it("discards a legacy shared player credential", () => {
+    localStorage.setItem("music_quiz_player_id", "shared-player-id");
+
+    expect(getStoredMusicQuizPlayerId(PARTICIPANT_CONTEXT)).toBeNull();
+    expect(localStorage.getItem("music_quiz_player_id")).toBeNull();
+  });
+
+  const PARTICIPANT_CONTEXT = {
+    connectionIdentity: "local:http://music-assistant:8095",
+    participantIdentity: "regular-user",
+  } as const;
+});
+
+describe("Music Quiz landing seen storage", () => {
+  const PARTICIPANT_CONTEXT = {
+    connectionIdentity: "local:http://music-assistant:8095",
+    participantIdentity: "regular-user",
+  } as const;
+  const PLAYER_ID = "private-player-id";
+
+  beforeEach(() => vi.stubGlobal("sessionStorage", createStorage()));
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("stores and reads back that the landing screen was seen", () => {
+    storeMusicQuizLandingSeen(PARTICIPANT_CONTEXT, PLAYER_ID);
+
+    expect(hasSeenMusicQuizLanding(PARTICIPANT_CONTEXT, PLAYER_ID)).toBe(true);
+  });
+
+  it("returns false and clears the flag on a storage context mismatch", () => {
+    storeMusicQuizLandingSeen(PARTICIPANT_CONTEXT, PLAYER_ID);
+    const otherServerContext = {
+      ...PARTICIPANT_CONTEXT,
+      connectionIdentity: "local:http://other-server:8095" as const,
+    };
+
+    expect(hasSeenMusicQuizLanding(otherServerContext, PLAYER_ID)).toBe(false);
+    expect(sessionStorage.getItem("music_quiz_landing_seen")).toBeNull();
+  });
+
+  it("returns false on a player_id mismatch", () => {
+    storeMusicQuizLandingSeen(PARTICIPANT_CONTEXT, PLAYER_ID);
+
+    expect(
+      hasSeenMusicQuizLanding(PARTICIPANT_CONTEXT, "other-player-id"),
+    ).toBe(false);
+  });
+
+  it("returns false on malformed stored JSON", () => {
+    sessionStorage.setItem("music_quiz_landing_seen", "{not-json");
+
+    expect(hasSeenMusicQuizLanding(PARTICIPANT_CONTEXT, PLAYER_ID)).toBe(false);
+    expect(sessionStorage.getItem("music_quiz_landing_seen")).toBeNull();
+  });
+});
+
+function createStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    key(index) {
+      return Array.from(values.keys())[index] ?? null;
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    setItem(key, value) {
+      values.set(key, value);
+    },
+  };
+}

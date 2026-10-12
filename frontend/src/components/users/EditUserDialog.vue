@@ -1,0 +1,342 @@
+<template>
+  <Dialog v-model:open="isOpen">
+    <DialogContent class="sm:max-w-[500px] max-h-[90vh] flex flex-col p-0">
+      <DialogHeader class="px-6 pt-6 pb-4">
+        <DialogTitle>{{ $t("auth.edit_user") }}</DialogTitle>
+      </DialogHeader>
+      <div ref="scrollContainer" class="flex-1 overflow-y-auto px-6">
+        <form id="form-edit-user" @submit.prevent="handleFormSubmit">
+          <FieldGroup>
+            <form.Field name="username">
+              <template #default="{ field }">
+                <FormTextField
+                  :field="field"
+                  :label="$t('auth.username')"
+                  :disabled="isSystemAccount"
+                  autocomplete="username"
+                  :description="
+                    isSystemAccount ? $t('auth.system_user_hint') : undefined
+                  "
+                />
+              </template>
+            </form.Field>
+
+            <form.Field name="displayName">
+              <template #default="{ field }">
+                <FormTextField
+                  :field="field"
+                  :label="$t('auth.display_name')"
+                  autocomplete="name"
+                  :description="$t('optional')"
+                  :show-validation="false"
+                />
+              </template>
+            </form.Field>
+
+            <form.Field name="role">
+              <template #default="{ field }">
+                <Field>
+                  <FieldLabel :for="field.name">
+                    {{ $t("auth.role") }}
+                  </FieldLabel>
+                  <Select
+                    :model-value="field.state.value"
+                    :disabled="isCurrentUser || isSystemAccount"
+                    @update:model-value="
+                      (value) => field.handleChange(value as string)
+                    "
+                  >
+                    <SelectTrigger :id="field.name" class="w-full">
+                      <SelectValue :placeholder="$t('auth.role')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem
+                        v-for="option in roleOptions"
+                        :key="option.value"
+                        :value="option.value"
+                      >
+                        {{ option.label }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </template>
+            </form.Field>
+
+            <form.Field name="avatarUrl">
+              <template #default="{ field }">
+                <FormTextField
+                  :field="field"
+                  :label="$t('auth.avatar_url')"
+                  :description="$t('auth.avatar_url_hint')"
+                />
+              </template>
+            </form.Field>
+
+            <form.Field v-if="!isSystemAccount" name="password">
+              <template #default="{ field }">
+                <FormTextField
+                  :field="field"
+                  :label="$t('auth.new_password')"
+                  type="password"
+                  autocomplete="new-password"
+                  :description="$t('auth.password_optional_hint')"
+                />
+              </template>
+            </form.Field>
+
+            <form.Field
+              v-if="!isSystemAccount && passwordValue"
+              name="confirmPassword"
+            >
+              <template #default="{ field }">
+                <FormTextField
+                  :field="field"
+                  :label="$t('auth.confirm_password')"
+                  type="password"
+                  autocomplete="new-password"
+                />
+              </template>
+            </form.Field>
+
+            <form.Field name="playerFilter">
+              <template #default="{ field }">
+                <Field>
+                  <FieldLabel>
+                    {{ $t("auth.player_filter") }}
+                  </FieldLabel>
+                  <MultiSelect
+                    :model-value="field.state.value"
+                    :options="playerOptions"
+                    :placeholder="$t('auth.select_players')"
+                    @update:model-value="field.handleChange"
+                  />
+                  <FieldDescription>
+                    {{ $t("auth.player_filter_hint") }}
+                  </FieldDescription>
+                </Field>
+              </template>
+            </form.Field>
+          </FieldGroup>
+        </form>
+      </div>
+      <DialogFooter class="px-6 pb-6 pt-4 border-t shrink-0">
+        <Button variant="outline" @click="handleClose">
+          {{ $t("cancel") }}
+        </Button>
+        <Button type="submit" form="form-edit-user" :loading="loading">
+          {{ $t("settings.save") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+</template>
+
+<script setup lang="ts">
+import { useForm } from "@tanstack/vue-form";
+import { useVModel } from "@vueuse/core";
+import { computed, nextTick, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import { toast } from "vue-sonner";
+
+import FormTextField from "@/components/forms/FormTextField.vue";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { assignableRoles, roleDisplayName } from "@/helpers/roles";
+import { isSystemUser } from "@/helpers/users";
+import { editUserSchema } from "@/lib/forms/profile";
+import { api, ApiCommandError } from "@/plugins/api";
+import type { User } from "@/plugins/api/interfaces";
+import { UserRole } from "@/plugins/api/interfaces";
+import { store } from "@/plugins/store";
+import MultiSelect from "./MultiSelect.vue";
+
+const { t } = useI18n();
+
+const props = defineProps<{
+  modelValue: boolean;
+  user: User | null;
+}>();
+
+const emit = defineEmits<{
+  "update:modelValue": [value: boolean];
+  updated: [];
+}>();
+
+const isOpen = useVModel(props, "modelValue", emit);
+
+const loading = ref(false);
+const scrollContainer = ref<HTMLElement | null>(null);
+
+const scrollToFirstError = async () => {
+  await nextTick();
+  if (!scrollContainer.value) return;
+
+  const firstErrorInput = scrollContainer.value.querySelector(
+    "[aria-invalid='true'], [data-invalid='true']",
+  ) as HTMLElement;
+
+  if (firstErrorInput) {
+    firstErrorInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    firstErrorInput.focus();
+  }
+};
+
+const handleFormSubmit = async () => {
+  await form.handleSubmit();
+  await nextTick();
+
+  if (scrollContainer.value) {
+    const hasErrors = scrollContainer.value.querySelector(
+      "[aria-invalid='true'], [data-invalid='true']",
+    );
+    if (hasErrors) {
+      await scrollToFirstError();
+    }
+  }
+};
+
+const roleOptions = computed(() =>
+  assignableRoles(store.roles, props.user?.role).map((role) => ({
+    label: roleDisplayName(role.role_id, store.roles),
+    value: role.role_id,
+  })),
+);
+
+const playerOptions = computed(() => {
+  return Object.values(api.players)
+    .map((player) => ({
+      label: player.name,
+      value: player.player_id,
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+});
+
+const isCurrentUser = computed(() => {
+  if (!props.user || !store.currentUser) return false;
+  return props.user.user_id === store.currentUser.user_id;
+});
+
+const isSystemAccount = computed(() => {
+  if (!props.user) return false;
+  return isSystemUser(props.user);
+});
+
+const form = useForm({
+  defaultValues: {
+    username: props.user?.username || "",
+    displayName: props.user?.display_name || "",
+    avatarUrl: props.user?.avatar_url || "",
+    role: props.user?.role || UserRole.USER,
+    password: "",
+    confirmPassword: "",
+    playerFilter: props.user?.player_filter || [],
+  },
+  validators: {
+    onSubmit: editUserSchema(t),
+  },
+  onSubmit: async ({ value }) => {
+    if (!props.user) return;
+
+    loading.value = true;
+
+    try {
+      const updates: {
+        username?: string;
+        displayName?: string;
+        avatarUrl?: string;
+        role?: string;
+        password?: string;
+        player_filter?: string[];
+      } = {};
+
+      if (value.username !== props.user.username) {
+        updates.username = value.username;
+      }
+      if (value.displayName !== (props.user.display_name || "")) {
+        updates.displayName = value.displayName;
+      }
+      if (value.avatarUrl !== (props.user.avatar_url || "")) {
+        updates.avatarUrl = value.avatarUrl;
+      }
+      if (value.role !== props.user.role && !isCurrentUser.value) {
+        updates.role = value.role;
+      }
+      if (value.password) {
+        updates.password = value.password;
+      }
+
+      const currentPlayerFilter = props.user.player_filter;
+      if (
+        JSON.stringify([...value.playerFilter].sort()) !==
+        JSON.stringify([...currentPlayerFilter].sort())
+      ) {
+        updates.player_filter = value.playerFilter;
+      }
+
+      await api.updateUser(props.user.user_id, updates, {
+        suppressGlobalError: true,
+      });
+      toast.success(t("auth.user_updated"));
+      emit("updated");
+      emit("update:modelValue", false);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiCommandError && error.details
+          ? error.details
+          : t("auth.user_update_failed"),
+      );
+    } finally {
+      loading.value = false;
+    }
+  },
+});
+
+const passwordValue = form.useStore((state) => state.values.password);
+
+const resetForm = () => {
+  if (props.user) {
+    form.setFieldValue("username", props.user.username);
+    form.setFieldValue("displayName", props.user.display_name || "");
+    form.setFieldValue("avatarUrl", props.user.avatar_url || "");
+    form.setFieldValue("role", props.user.role);
+    form.setFieldValue("password", "");
+    form.setFieldValue("confirmPassword", "");
+    form.setFieldValue("playerFilter", props.user.player_filter);
+  }
+};
+
+const handleClose = () => {
+  resetForm();
+  emit("update:modelValue", false);
+};
+
+watch(() => props.user, resetForm, { immediate: true });
+watch(
+  () => props.modelValue,
+  (newVal) => {
+    if (newVal) {
+      resetForm();
+    }
+  },
+);
+</script>

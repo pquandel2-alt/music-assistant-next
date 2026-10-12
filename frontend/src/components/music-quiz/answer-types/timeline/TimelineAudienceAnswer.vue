@@ -1,0 +1,192 @@
+<template>
+  <div
+    data-testid="timeline-audience-answer"
+    class="flex flex-col gap-4"
+    :class="{
+      'lg:h-full lg:min-h-0 lg:overflow-hidden': present,
+      // dashboard answering: progress fills the left half, countdown sits right
+      'lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(14rem,18rem)] lg:grid-rows-[minmax(0,1fr)]':
+        present && dashboard && state.phase === 'answering',
+    }"
+  >
+    <div
+      v-if="state.phase === 'answering'"
+      class="flex flex-col items-center gap-2"
+      :class="{
+        'lg:order-2 lg:justify-center': present && dashboard,
+      }"
+    >
+      <MusicQuizCountdown
+        :size="present ? 150 : 112"
+        :fraction="remainingFraction"
+        :label="remainingLabel || '…'"
+      />
+    </div>
+
+    <TimelineDisplay
+      v-if="showTimeline"
+      :entries="currentRound.timeline"
+      :highlighted-entry-id="currentRound.revealed_entry?.entry_id"
+    />
+
+    <div
+      class="grid gap-4"
+      :class="{
+        'lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden':
+          present && state.phase === 'answering' && !dashboard,
+        // the dashboard has no side leaderboard while answering; progress gets the full row
+        'lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(0,1fr)] lg:overflow-hidden':
+          present &&
+          ((state.phase === 'answering' && dashboard) ||
+            (state.phase === 'reveal' &&
+              (dashboard || !revealedResults.length))),
+        'lg:min-h-0 lg:flex-1 lg:grid-rows-[minmax(7rem,2fr)_minmax(9rem,3fr)] lg:overflow-hidden':
+          present &&
+          state.phase === 'reveal' &&
+          !dashboard &&
+          revealedResults.length > 0,
+        'lg:order-1 lg:h-full':
+          present && dashboard && state.phase === 'answering',
+        'lg:grid-cols-2': !present,
+      }"
+    >
+      <TimelineProgress
+        v-if="state.phase === 'answering'"
+        :statuses="roundPlayerStatuses"
+        :scrollable="present"
+      />
+
+      <Card
+        v-if="state.phase === 'reveal' && revealedResults.length && !dashboard"
+        data-testid="timeline-round-results"
+        role="region"
+        :aria-label="$t('providers.music_quiz.timeline_round_results')"
+        :class="{
+          'lg:min-h-0 lg:gap-3 lg:overflow-hidden lg:py-3': present,
+        }"
+      >
+        <CardHeader :class="{ 'lg:px-4': present }">
+          <CardTitle class="text-base">
+            {{ $t("providers.music_quiz.timeline_round_results") }}
+          </CardTitle>
+        </CardHeader>
+        <CardContent
+          :class="{
+            'lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain lg:px-4':
+              present,
+          }"
+        >
+          <ul class="flex flex-col gap-2">
+            <li
+              v-for="result in revealedResults"
+              :key="result.name"
+              class="bg-muted flex items-center justify-between gap-3 rounded-md px-3 py-2"
+            >
+              <span class="min-w-0 flex-1 truncate font-medium">
+                {{ result.name }}
+              </span>
+              <span
+                data-testid="timeline-result-score"
+                class="flex min-w-0 max-w-[45%] items-center gap-1 font-semibold tabular-nums"
+              >
+                <CircleCheck
+                  v-if="result.placementCorrect"
+                  class="size-4 text-green-600 dark:text-green-400"
+                  aria-hidden="true"
+                />
+                <CircleX
+                  v-else
+                  class="text-muted-foreground size-4"
+                  aria-hidden="true"
+                />
+                <span class="sr-only">
+                  {{
+                    result.placementCorrect
+                      ? $t("providers.music_quiz.timeline_correct_placement")
+                      : $t("providers.music_quiz.timeline_incorrect_placement")
+                  }}
+                </span>
+                <span
+                  class="min-w-0 flex-1 truncate"
+                  :class="
+                    result.points > 0
+                      ? 'text-green-600 dark:text-green-400'
+                      : 'text-muted-foreground'
+                  "
+                >
+                  +{{ result.points }}
+                </span>
+              </span>
+            </li>
+          </ul>
+        </CardContent>
+      </Card>
+
+      <div
+        v-if="present && (!dashboard || state.phase === 'reveal')"
+        data-testid="timeline-leaderboard-region"
+        class="lg:min-h-0 lg:overflow-hidden"
+      >
+        <slot name="leaderboard"></slot>
+      </div>
+      <slot v-else-if="!present" name="leaderboard"></slot>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import TimelineDisplay from "@/components/music-quiz/answer-types/timeline/TimelineDisplay.vue";
+import TimelineProgress from "@/components/music-quiz/answer-types/timeline/TimelineProgress.vue";
+import MusicQuizCountdown from "@/components/music-quiz/MusicQuizCountdown.vue";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type {
+  MusicQuizTimelinePublicState,
+  MusicQuizTimelineRound,
+} from "@/composables/music-quiz/useMusicQuiz";
+import { useMusicQuizAnswerDeadline } from "@/composables/music-quiz/useMusicQuizAnswerDeadline";
+import { getMusicQuizRoundPlayers } from "@/helpers/music_quiz";
+import { $t } from "@/plugins/i18n";
+import { CircleCheck, CircleX } from "@lucide/vue";
+import { computed, type VNode } from "vue";
+
+const props = withDefaults(
+  defineProps<{
+    state: MusicQuizTimelinePublicState;
+    currentRound: MusicQuizTimelineRound;
+    present?: boolean;
+    showTimeline?: boolean;
+    dashboard?: boolean;
+  }>(),
+  {
+    present: false,
+    showTimeline: true,
+    dashboard: false,
+  },
+);
+defineSlots<{ leaderboard: () => VNode[] }>();
+
+const revealedResults = computed(() =>
+  props.state.players.flatMap((player) => {
+    const answer = player.last_answer;
+    if (!answer) return [];
+    return [
+      {
+        name: player.name,
+        placementCorrect: answer.placement.correct,
+        points:
+          answer.placement.points +
+          (answer.artist?.points ?? 0) +
+          (answer.title?.points ?? 0),
+      },
+    ];
+  }),
+);
+const roundPlayerStatuses = computed(() =>
+  getMusicQuizRoundPlayers(props.state.players, props.currentRound.round_index),
+);
+const { remainingLabel, remainingFraction } = useMusicQuizAnswerDeadline({
+  active: () => props.state.phase === "answering",
+  deadline: () => props.currentRound.deadline,
+  duration: () => props.state.answer_duration,
+});
+</script>

@@ -1,0 +1,561 @@
+<template>
+  <div
+    v-hold="onHold"
+    class="ed-card ma-tap"
+    role="button"
+    tabindex="0"
+    :class="{
+      'ed-card--unavailable': !isAvailable && !notInLibrary,
+      'ed-card--not-in-library': notInLibrary,
+      'ed-card--fluid': fluid,
+      'ed-card--disabled': disabled,
+      'ed-card--round': round,
+    }"
+    @click="onClick"
+    @keydown.enter.self="onClick"
+    @keydown.space.self.prevent="onClick"
+    @contextmenu.prevent="onMenu"
+    @touchstart.passive="holdFired = false"
+  >
+    <div class="ed-card__art" :style="getStyle">
+      <img
+        v-if="artImage && props.item.media_type != MediaType.COLLECTION"
+        class="ed-card__img"
+        :class="{
+          'ed-card__img--genre': isGenre,
+          'ed-card__img--provider': !art.image,
+        }"
+        loading="lazy"
+        :src="artImage"
+        alt=""
+        @error="artFailed = true"
+      />
+      <MediaCollectionThumb
+        v-else-if="props.item.media_type == MediaType.COLLECTION"
+        :item="props.item as MediaCollection<MediaItemType>"
+        :thumb-offset="22"
+      />
+      <span v-else-if="art.initials" class="ed-card__initials">{{
+        art.initials
+      }}</span>
+      <ProviderIcon
+        v-if="providerDomain"
+        class="ed-card__provider"
+        :domain="providerDomain"
+        :size="20"
+      />
+      <NowPlayingBadge
+        v-if="isPlaying"
+        :show-badge="false"
+        icon-style="position: absolute; right: 6px; bottom: 6px; z-index: 2"
+      />
+      <!-- the now playing bars take this corner while the item plays -->
+      <span
+        v-if="playedStateLabel && !isPlaying"
+        class="ed-card__played"
+        role="img"
+        :title="playedStateLabel"
+        :aria-label="playedStateLabel"
+      >
+        <Check v-if="isFullyPlayed" :size="16" />
+        <ClockFading v-else :size="16" />
+      </span>
+      <slot name="art-overlay"></slot>
+      <div
+        v-if="showCheckboxes"
+        class="ed-card__select"
+        :class="{ 'ed-card__select--on': isSelected }"
+      >
+        <v-icon
+          size="30"
+          :icon="
+            isSelected
+              ? 'mdi-check-circle'
+              : 'mdi-checkbox-blank-circle-outline'
+          "
+        />
+      </div>
+    </div>
+    <div class="ed-card__meta">
+      <div
+        class="ed-card__title"
+        :class="{ 'ed-card__title--playing': isPlaying }"
+      >
+        {{ displayName }}
+      </div>
+      <div class="ed-card__sub">
+        <slot name="subtitle">{{ subtitle }}</slot>
+      </div>
+      <span v-if="showPlay" class="ed-card__play" @click.stop="onPlay">
+        <Play
+          :size="18"
+          fill="currentColor"
+          :stroke-width="0"
+          class="ed-card__play-icon play-icon-centered"
+        />
+      </span>
+    </div>
+
+    <slot name="actions"></slot>
+  </div>
+</template>
+
+<script setup lang="ts">
+import {
+  itemArtwork,
+  placeholderArtwork,
+  placeholderBackground,
+} from "@/components/discover/editorialArtwork";
+import NowPlayingBadge from "@/components/NowPlayingBadge.vue";
+import ProviderIcon from "@/components/ProviderIcon.vue";
+import { useProviderIcon } from "@/composables/useProviderIcon";
+import {
+  handleMediaItemClick,
+  handleMenuBtnClick,
+  handlePlayBtnClick,
+} from "@/helpers/media_item_actions";
+import {
+  getArtistsString,
+  getAuthorsNarratorsArray,
+  getBrowseFolderName,
+} from "@/helpers/utils";
+import {
+  getListItemProviderIconDomain,
+  getProviderRootDomain,
+  isMusicBrainzItem,
+  itemSupportsPlayLog,
+} from "@/plugins/api/helpers";
+import {
+  type Album,
+  type BrowseFolder,
+  type ItemMapping,
+  type MediaItemType,
+  MediaType,
+  type MediaCollection,
+  type PodcastEpisode,
+  type Track,
+} from "@/plugins/api/interfaces";
+import { Check, ClockFading, Play } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
+import MediaCollectionThumb from "../MediaCollectionThumb.vue";
+
+interface Props {
+  item: MediaItemType | ItemMapping;
+  showProviderOnCover?: boolean;
+  isAvailable?: boolean;
+  fluid?: boolean;
+  isSelected?: boolean;
+  showCheckboxes?: boolean;
+  isPlaying?: boolean;
+  disablePlayButton?: boolean;
+  disabled?: boolean;
+  // circular artwork, for artist cards
+  round?: boolean;
+  parentItem?: MediaItemType;
+  sortBy?: string;
+}
+const props = withDefaults(defineProps<Props>(), {
+  showProviderOnCover: false,
+  isAvailable: true,
+  fluid: false,
+  isSelected: false,
+  showCheckboxes: false,
+  isPlaying: false,
+  disablePlayButton: false,
+  disabled: false,
+  round: false,
+  parentItem: undefined,
+  sortBy: undefined,
+});
+
+const emit = defineEmits<{
+  (e: "select", item: MediaItemType | ItemMapping, selected: boolean): void;
+}>();
+
+const { t } = useI18n();
+
+const resolvedArt = computed(() => itemArtwork(props.item, 320));
+
+// a proxied cover can 404 (e.g. a release the Cover Art Archive has none for),
+// which leaves the item on the placeholder treatment instead of a broken image;
+// the next item, or this one refreshed with another cover, gets its own attempt
+const artFailed = ref(false);
+watch(
+  () => [props.item.uri, resolvedArt.value.image],
+  () => (artFailed.value = false),
+);
+
+const art = computed(() =>
+  artFailed.value ? placeholderArtwork(props.item) : resolvedArt.value,
+);
+
+const isGenre = computed(() => props.item.media_type === MediaType.GENRE);
+
+// a release only MusicBrainz knows: muted rather than shown as unavailable,
+// since it can be opened and added to the library
+const notInLibrary = computed(() => isMusicBrainzItem(props.item));
+
+// provider entries in the browse root show the provider icon
+const { iconDataUri: providerRootIcon } = useProviderIcon(() =>
+  getProviderRootDomain(props.item),
+);
+const artImage = computed(() => art.value.image ?? providerRootIcon.value);
+
+const getStyle = computed(() => {
+  if (props.item.media_type == MediaType.COLLECTION) return {};
+  // a logo needs a plain backdrop rather than the banner artwork
+  if (!art.value.image && providerRootIcon.value)
+    return { background: placeholderBackground };
+  return { background: art.value.gradient };
+});
+
+const isPlayable = computed(() => props.item.is_playable !== false);
+const showPlay = computed(
+  () =>
+    isPlayable.value &&
+    props.isAvailable &&
+    !notInLibrary.value &&
+    !props.showCheckboxes,
+);
+
+// Provider badge on the cover — always for playlists (to show the source),
+// otherwise only when the consumer opts in via showProviderOnCover.
+const providerDomain = computed<string | undefined>(() => {
+  const it = props.item;
+  if (!("provider_mappings" in it)) return undefined;
+  if (!props.showProviderOnCover && it.media_type !== MediaType.PLAYLIST) {
+    return undefined;
+  }
+  return getListItemProviderIconDomain(it);
+});
+
+const isFullyPlayed = computed(
+  () => itemSupportsPlayLog(props.item) && !!props.item.fully_played,
+);
+const isInProgress = computed(
+  () => itemSupportsPlayLog(props.item) && !!props.item.resume_position_ms,
+);
+// undefined while unplayed, when the cover shows no played state
+const playedStateLabel = computed(() => {
+  if (isFullyPlayed.value) return t("item_fully_played");
+  return isInProgress.value ? t("item_in_progress") : undefined;
+});
+
+const displayName = computed(() => {
+  const it = props.item;
+  if (it.media_type === MediaType.FOLDER) {
+    return getBrowseFolderName(it as BrowseFolder);
+  }
+  let name = it.name;
+  if ("version" in it && it.version) name += ` - ${it.version}`;
+  return name;
+});
+
+const subtitle = computed(() => {
+  const it = props.item as Partial<
+    Album &
+      Track &
+      PodcastEpisode & {
+        authors?: string[];
+        publisher?: string;
+        owner?: string;
+      }
+  >;
+  if (notInLibrary.value) return t("not_in_library");
+  if (it.artists?.length) return getArtistsString(it.artists, 1);
+  if (it.authors?.length)
+    return getAuthorsNarratorsArray(it.authors).join(" / ");
+  if (it.publisher) return it.publisher;
+  if (it.owner) return it.owner;
+  // inside its own podcast the podcast name would only repeat on every episode
+  if (it.podcast?.name && props.parentItem?.media_type !== MediaType.PODCAST)
+    return it.podcast.name;
+  return t(props.item.media_type);
+});
+
+// Set while a long-press opened the context menu, so the click that fires on
+// finger-lift does not also navigate. Reset on the next touchstart.
+const holdFired = ref(false);
+
+const onClick = (e: MouseEvent | KeyboardEvent) => {
+  if (props.disabled) return;
+  if (holdFired.value) {
+    holdFired.value = false;
+    return;
+  }
+  if (props.showCheckboxes) {
+    emit("select", props.item, !props.isSelected);
+    return;
+  }
+  const x = "clientX" in e ? e.clientX : 0;
+  const y = "clientY" in e ? e.clientY : 0;
+  handleMediaItemClick(props.item, x, y, props.parentItem);
+};
+// Long-press on touch devices: open the same context menu as right-click.
+const onHold = (e: TouchEvent) => {
+  if (props.disabled || props.showCheckboxes) return;
+  holdFired.value = true;
+  const touch = e.touches?.[0];
+  handleMenuBtnClick(
+    props.item,
+    touch?.clientX ?? 0,
+    touch?.clientY ?? 0,
+    props.parentItem,
+    true,
+    props.sortBy,
+  );
+};
+const onPlay = (e: MouseEvent) => {
+  if (props.showCheckboxes || props.disablePlayButton) return;
+  handlePlayBtnClick(
+    props.item,
+    e.clientX,
+    e.clientY,
+    props.parentItem,
+    undefined,
+    props.sortBy,
+  );
+};
+const onMenu = (e: MouseEvent) => {
+  if (props.showCheckboxes) return;
+  handleMenuBtnClick(
+    props.item,
+    e.clientX,
+    e.clientY,
+    props.parentItem,
+    true,
+    props.sortBy,
+  );
+};
+</script>
+
+<style scoped>
+.ed-card {
+  --ed-card-pad: 8px;
+  --ed-art-size: var(--ed-tile-art, 168px);
+  position: relative;
+  flex: 0 0 auto;
+  width: calc(var(--ed-art-size) + 2 * var(--ed-card-pad));
+  box-sizing: border-box;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: var(--ed-card-pad);
+  border-radius: var(--ed-card-pad);
+  color: rgb(var(--v-theme-on-background));
+  scroll-snap-align: start;
+  transition: background 0.15s ease;
+}
+.ed-card--fluid {
+  width: 100%;
+}
+.ed-card--fluid .ed-card__art {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+}
+.ed-card--fluid .ed-card__meta {
+  width: 100%;
+}
+.ed-card:hover {
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+.ed-card--unavailable {
+  opacity: 0.3;
+}
+/* a release that is not in the library: muted artwork, readable title */
+.ed-card--not-in-library .ed-card__art {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+.ed-card--disabled {
+  pointer-events: none;
+}
+.ed-card__art {
+  position: relative;
+  container-type: inline-size;
+  width: var(--ed-art-size);
+  height: var(--ed-art-size);
+  border-radius: var(--ed-card-pad);
+  overflow: hidden;
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.25),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+.ed-card--round .ed-card__art {
+  border-radius: 999px;
+}
+.ed-card__initials {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34cqw;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  user-select: none;
+}
+.ed-card__provider {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+}
+.ed-card__played {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+}
+.ed-card__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+/* Genre icons render in white over the banner background (same treatment as
+   the "Browse by genre" tiles on the home screen). */
+.ed-card__img--genre {
+  object-fit: contain;
+  padding: 18%;
+  filter: brightness(0) invert(1);
+}
+/* Inset the logo and keep wide wordmarks whole instead of cropped. */
+.ed-card__img--provider {
+  object-fit: contain;
+  padding: 18%;
+}
+.ed-card__select {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 8px;
+  z-index: 3;
+  color: #fff;
+  transition: background 0.15s ease;
+}
+.ed-card__select--on {
+  background: rgba(0, 0, 0, 0.45);
+}
+/* subtle grey ring on the outside so the white unselected circle stays visible on light thumbs */
+.ed-card__select:not(.ed-card__select--on) .v-icon {
+  position: relative;
+}
+.ed-card__select:not(.ed-card__select--on) .v-icon::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 83%;
+  height: 83%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(192, 192, 192, 0.85);
+  pointer-events: none;
+}
+.ed-card__play {
+  position: absolute;
+  bottom: 2px;
+  right: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: rgb(var(--v-theme-primary));
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition:
+    opacity 0.18s,
+    transform 0.18s;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+  z-index: 4;
+}
+.ed-card__play-icon {
+  /* guarantee a solid white triangle regardless of lucide's default fill */
+  fill: currentColor;
+  stroke: none;
+}
+.ed-card:hover .ed-card__play {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+/* a round card reveals its play button over the middle of the portrait */
+.ed-card--round .ed-card__meta {
+  position: static;
+}
+.ed-card--round .ed-card__play {
+  top: calc(var(--ed-card-pad) + var(--ed-art-size) / 2);
+  right: auto;
+  bottom: auto;
+  left: 50%;
+  transform: translate(-50%, -50%) translateY(8px);
+}
+.ed-card--round:hover .ed-card__play {
+  transform: translate(-50%, -50%);
+}
+/* Touch devices: no hover-revealed play button — tap goes straight to the
+   content and long-press opens the context menu instead. */
+@media (hover: none) {
+  .ed-card__play {
+    display: none;
+  }
+}
+.ma-tap:active {
+  transform: scale(0.97);
+}
+.ed-card__meta {
+  position: relative;
+  width: var(--ed-art-size);
+  margin-top: 10px;
+}
+.ed-card__title {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ed-card__title--playing {
+  color: rgb(var(--v-theme-primary));
+}
+.ed-card__sub {
+  font-size: 12px;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+@media (max-width: 500px) {
+  .ed-card {
+    --ed-card-pad: 4px;
+  }
+  .ed-card__meta {
+    margin-top: 4px;
+  }
+  .ed-card__sub {
+    margin-top: 0;
+  }
+}
+</style>

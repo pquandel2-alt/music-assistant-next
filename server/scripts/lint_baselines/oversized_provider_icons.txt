@@ -1,0 +1,3 @@
+# Provider/controller icons that already exceeded their size budget when the check was introduced.
+# New icons must stay within budget (svg <= 5 KB, png <= 20 KB); shrink these and drop them from this list.
+# Regenerate with: uv run -m scripts.check_provider_icons --update-baseline

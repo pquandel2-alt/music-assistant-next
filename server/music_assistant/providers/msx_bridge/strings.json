@@ -1,0 +1,34 @@
+{
+  "config_entries": {
+    "http_port": {
+      "label": "HTTP Server Port",
+      "description": "Port for the MSX HTTP server."
+    },
+    "output_format": {
+      "label": "Audio Output Format",
+      "description": "Audio format for streaming to MSX (mp3, aac, or flac)."
+    },
+    "player_idle_timeout": {
+      "label": "Player Idle Timeout (minutes)",
+      "description": "Unregister MSX players after this many minutes without activity."
+    },
+    "show_stop_notification": {
+      "label": "Show playback stopped notification",
+      "description": "Show an informational notice after MSX playback is stopped from MA."
+    },
+    "group_stream_mode": {
+      "label": "Stream Delivery Mode",
+      "description": "How audio reaches the TVs. 'MA Streamserver' redirects TVs directly and is recommended. 'Independent' proxies a separate local ffmpeg stream for compatibility. Redirect falls back to Independent automatically when a direct URL cannot be resolved.",
+      "options": {
+        "redirect": "MA Streamserver (recommended)",
+        "independent": "Independent local proxy (compatibility)"
+      }
+    }
+  },
+  "manifest": {
+    "description": "Stream music to Smart TVs via Media Station X"
+  },
+  "errors": {
+    "player_offline": "MSX TV {0} is offline."
+  }
+}

@@ -1,0 +1,3895 @@
+import { store } from "../store";
+
+import { computed, reactive, ref } from "vue";
+import { toast } from "vue-sonner";
+import { resolveActiveSourceId } from "@/composables/activeSource";
+import { resolveProviderDomain } from "@/helpers/provider_domain";
+import {
+  resetServerTime,
+  serverNow,
+  startServerTimeSync,
+  stopServerTimeSync,
+} from "@/composables/useServerTime";
+import { $t, i18n } from "../i18n";
+import type { ITransport } from "../remote/transport";
+import { WebSocketTransport } from "../remote/websocket-transport";
+import { ApiCommandError } from "./errors";
+import { getDeviceName, itemSupportsPlayLog } from "./helpers";
+import {
+  type Album,
+  type AnnouncementTtsEngine,
+  type Artist,
+  type AuthToken,
+  type BackgroundTask,
+  type CommandMessage,
+  type DiscoveryArtistPage,
+  type ErrorResultMessage,
+  type EventMessage,
+  type Genre,
+  type MassEvent,
+  type MediaItemType,
+  type Player,
+  type PlayerOptionValueType,
+  type PlayerQueue,
+  type Playlist,
+  type PlaylistAccess,
+  type ProviderInstance,
+  type QueueItem,
+  type Radio,
+  type ServerInfoMessage,
+  type SetupFlowStep,
+  type SuccessResultMessage,
+  type TaskSchedule,
+  type Track,
+  type User,
+  type UserSummary,
+  AlbumType,
+  Audiobook,
+  AuthProvider,
+  ConfigActionResult,
+  ConfigEntry,
+  ConfigValueType,
+  CoreConfig,
+  DSPConfig,
+  DSPConfigPreset,
+  DSPIRMetadata,
+  EventType,
+  ItemMapping,
+  MediaItemTypeOrItemMapping,
+  MediaType,
+  PlayableMediaItemType,
+  PlayerConfig,
+  PlayerQueueConfig,
+  PlaylistMatchPolicy,
+  Podcast,
+  PodcastEpisode,
+  ProviderAccess,
+  ProviderConfig,
+  ProviderIconVariant,
+  ProviderManifest,
+  ProviderType,
+  QueueOption,
+  RecommendationFolder,
+  RemoteAccessInfo,
+  RepeatMode,
+  Role,
+  Scope,
+  NetworkShareSettings,
+  SearchResults,
+  ShareType,
+  SmartPlaylistRules,
+  SoundEffect,
+  SourceFolder,
+  StorageInfo,
+  StorageLocation,
+  StreamServerInfo,
+  TranscriptCue,
+  MediaCollection,
+  ArtistType,
+} from "./interfaces";
+
+const DEBUG = process.env.NODE_ENV === "development";
+
+// The oldest server API schema this frontend works with. Only the public web app
+// (app.music-assistant.io) can meet an older server, the bundled frontend always
+// matches its own. Raise it when a change would break the previous stable server.
+export const MIN_SERVER_SCHEMA_VERSION = 75;
+
+export interface CommandOptions {
+  /**
+   * Skip the global console.error + error toast for an error result. Use for a
+   * best-effort command whose failure the caller handles (or expects) itself.
+   *
+   * Pass a predicate for a command where only some failures are expected: it is
+   * evaluated when the error arrives, not when the command is sent. The
+   * returned promise rejects either way.
+   */
+  suppressGlobalError?: boolean | (() => boolean);
+}
+
+export interface PlayMediaOptions {
+  start_item?: PlayableMediaItemType | string;
+  queue_id?: string;
+  sort_by?: string;
+  start_from_beginning?: boolean;
+  /** Set playback order for immediate-play options; omit to let the server decide. */
+  shuffle?: boolean;
+}
+
+export enum ConnectionState {
+  DISCONNECTED = "disconnected", // Not connected
+  CONNECTING = "connecting", // Establishing connection
+  CONNECTED = "connected", // Transport connected, ServerInfo received
+  AUTH_REQUIRED = "auth_required", // Connected but needs authentication (no stored token or auto-auth failed)
+  AUTHENTICATING = "authenticating", // Authentication in progress
+  AUTHENTICATED = "authenticated", // Fully authenticated, ready to fetch state
+  INITIALIZED = "initialized", // Initial state sync completed
+  RECONNECTING = "reconnecting", // Lost connection, attempting to reconnect
+  FAILED = "failed", // Connection failed permanently
+}
+
+export { ApiCommandError };
+
+/** Rejection for in-flight commands that can never be answered because the connection dropped. */
+export class ConnectionLostError extends Error {
+  constructor() {
+    super("Connection lost");
+    this.name = "ConnectionLostError";
+  }
+}
+
+export class MusicAssistantApi {
+  private transport?: ITransport;
+  private _throttleId?: ReturnType<typeof setTimeout>;
+  public baseUrl?: string; // HTTP base URL for image proxy etc.
+  public isRemoteConnection = ref<boolean>(false);
+  public state = ref<ConnectionState>(ConnectionState.DISCONNECTED);
+  public transportState = ref<string>("disconnected");
+  public serverInfo = ref<ServerInfoMessage>();
+  public players = reactive<{ [player_id: string]: Player }>({});
+  public queues = reactive<{ [queue_id: string]: PlayerQueue }>({});
+  public queueElapsedTime = reactive<{
+    [queue_id: string]: {
+      elapsed_time: number;
+      elapsed_time_last_updated: number;
+    };
+  }>({});
+  public providers = reactive<{ [instance_id: string]: ProviderInstance }>({});
+  public providerManifests = reactive<{ [domain: string]: ProviderManifest }>(
+    {},
+  );
+  public providerIcons = reactive<{ [key: string]: string | null }>({});
+  private _providerIconRequests = new Map<string, Promise<string | null>>();
+  // core config values by "<domain>/<key>", dropped when this client saves a core config
+  // and when the full state is (re)fetched, so a change made from another client is
+  // picked up on the next (re)connect.
+  private _coreConfigValues = new Map<string, Promise<ConfigValueType>>();
+  public hasStreamingProviders = computed(() => {
+    return Object.values(this.providers).some((p) => p.is_streaming_provider);
+  });
+  private eventCallbacks: Array<[EventType, string, CallableFunction]>;
+  private partialResult: { [msg_id: string]: Array<unknown> };
+  private commands: Map<
+    string,
+    {
+      resolve: (result: unknown) => void;
+      reject: (err: unknown) => void;
+      suppressGlobalError?: CommandOptions["suppressGlobalError"];
+    }
+  >;
+
+  constructor() {
+    this.eventCallbacks = [];
+    this.commands = new Map();
+    this.partialResult = {};
+  }
+
+  /**
+   * Initialize the API with either a server address or a transport
+   * @param transportOrAddress - Either an ITransport instance or a server address string
+   * @param baseUrl - Optional HTTP base URL (required for WebRTC, derived automatically for server address)
+   */
+  public async initialize(
+    transportOrAddress: ITransport | string,
+    baseUrl?: string,
+  ): Promise<void> {
+    if (this.transport) throw new Error("already initialized");
+
+    let transport: ITransport;
+    let isRemote = false;
+
+    // If string, create WebSocketTransport
+    if (typeof transportOrAddress === "string") {
+      let serverAddress = transportOrAddress;
+      if (serverAddress.endsWith("/"))
+        serverAddress = serverAddress.slice(0, -1);
+
+      // Normalize the server address
+      let httpBaseUrl: string;
+      let wsUrl: string;
+
+      if (
+        serverAddress.startsWith("ws://") ||
+        serverAddress.startsWith("wss://")
+      ) {
+        wsUrl = serverAddress;
+        httpBaseUrl = serverAddress
+          .replace("wss://", "https://")
+          .replace("ws://", "http://");
+        if (httpBaseUrl.endsWith("/ws")) {
+          httpBaseUrl = httpBaseUrl.slice(0, -3);
+        }
+      } else {
+        httpBaseUrl = serverAddress;
+        wsUrl = serverAddress
+          .replace("https://", "wss://")
+          .replace("http://", "ws://");
+      }
+
+      if (!wsUrl.endsWith("/ws")) {
+        wsUrl += "/ws";
+      }
+
+      transport = new WebSocketTransport({ url: wsUrl });
+      baseUrl = httpBaseUrl;
+    } else {
+      // Transport instance provided (WebRTC)
+      transport = transportOrAddress;
+      isRemote = true;
+    }
+
+    this.transport = transport;
+    this.baseUrl = baseUrl || "";
+    this.isRemoteConnection.value = isRemote;
+    this.state.value = ConnectionState.CONNECTING;
+
+    // Set up transport message handler
+    transport.on("message", (data: string) => {
+      try {
+        const msg = JSON.parse(data);
+        this.handleMessage(msg);
+      } catch (error) {
+        console.error("[API] Failed to parse message:", error);
+      }
+    });
+
+    transport.on("close", () => {
+      // Don't immediately emit DISCONNECTED - wait for stateChange
+      // to see if we're reconnecting or truly disconnected
+    });
+
+    transport.on("error", (error: Error) => {
+      console.error("[API] Transport error:", error);
+    });
+
+    // Listen for transport state changes (reconnecting, failed, etc.)
+    transport.on("stateChange", (state) => {
+      this.handleTransportStateChange(state);
+    });
+
+    await transport.connect();
+
+    // Wait for initial ServerInfo message
+    await this.waitForServerInfo();
+  }
+
+  /**
+   * Handle incoming message from the transport
+   */
+  private handleMessage(
+    msg:
+      | ServerInfoMessage
+      | EventMessage
+      | SuccessResultMessage
+      | ErrorResultMessage,
+  ): void {
+    // Handle ServerInfo message (sent on connection and reconnection)
+    if ("server_version" in msg && "server_id" in msg && !("event" in msg)) {
+      this.handleServerInfoMessage(msg as ServerInfoMessage);
+      return;
+    }
+
+    // Handle event messages
+    if ("event" in msg) {
+      this.handleEventMessage(msg as EventMessage);
+      return;
+    }
+
+    // Handle result messages
+    if ("message_id" in msg) {
+      this.handleResultMessage(msg);
+      return;
+    }
+
+    console.error("[API] received unknown message", msg);
+  }
+
+  /**
+   * Wait for ServerInfo message with timeout
+   */
+  private waitForServerInfo(timeoutMs: number = 30000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Timeout waiting for ServerInfo"));
+      }, timeoutMs);
+
+      // Check if already have server info
+      if (this.serverInfo.value) {
+        clearTimeout(timeout);
+        resolve();
+        return;
+      }
+
+      // Listen for server info via event
+      const unsubscribe = this.subscribe(EventType.CONNECTED, () => {
+        clearTimeout(timeout);
+        unsubscribe();
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Authenticate with username and password
+   * Returns the auth token on success
+   */
+  public async loginWithCredentials(
+    username: string,
+    password: string,
+    deviceName?: string,
+  ): Promise<{ token: string; user: User }> {
+    // Mark as authenticating
+    this.state.value = ConnectionState.AUTHENTICATING;
+
+    const result = await this.sendCommand<{
+      access_token?: string;
+      token?: string;
+      user?: User;
+      success?: boolean;
+      error?: string;
+    }>("auth/login", {
+      username,
+      password,
+      device_name: deviceName || getDeviceName(),
+    });
+
+    // Check if login failed
+    if (result.success === false || result.error) {
+      // Login failed - require authentication again
+      this.state.value = ConnectionState.AUTH_REQUIRED;
+      throw new Error(result.error || "Invalid credentials");
+    }
+
+    // Server may return 'access_token' or 'token'
+    const token = result.access_token || result.token;
+
+    if (token) {
+      await this.sendCommand("auth", { token });
+      this.state.value = ConnectionState.AUTHENTICATED;
+    }
+
+    return { token: token || "", user: result.user! };
+  }
+
+  /**
+   * Authenticate with an existing token
+   */
+  public async authenticateWithToken(
+    token: string,
+    deviceName?: string,
+  ): Promise<{ user: User }> {
+    // Mark as authenticating
+    this.state.value = ConnectionState.AUTHENTICATING;
+
+    try {
+      const result = await this.sendCommand<{ user: User }>("auth", {
+        token,
+        device_name: deviceName || getDeviceName(),
+      });
+
+      if (result.user) {
+        this.state.value = ConnectionState.AUTHENTICATED;
+      }
+
+      return result;
+    } catch (error) {
+      // a dropped connection says nothing about the token; leave the
+      // reconnect flow intact so re-auth runs again after reconnect
+      if (!(error instanceof ConnectionLostError)) {
+        // Token is invalid - require user authentication
+        this.state.value = ConnectionState.AUTH_REQUIRED;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Set state to AUTH_REQUIRED when no token is available for auto-authentication
+   */
+  public requireAuthentication(): void {
+    if (this.state.value === ConnectionState.CONNECTED) {
+      this.state.value = ConnectionState.AUTH_REQUIRED;
+    }
+  }
+
+  /**
+   * Disconnect from the server
+   */
+  public disconnect(): void {
+    if (this.transport) {
+      this.transport.disconnect();
+      this.transport = undefined;
+    }
+    this.state.value = ConnectionState.DISCONNECTED;
+    this.isRemoteConnection.value = false;
+    // the next connection may be to a different server, whose clock offset is unrelated
+    resetServerTime();
+    this._failPendingCommands();
+
+    // Clear reactive state
+    Object.keys(this.players).forEach((key) => delete this.players[key]);
+    Object.keys(this.queues).forEach((key) => delete this.queues[key]);
+    Object.keys(this.queueElapsedTime).forEach(
+      (key) => delete this.queueElapsedTime[key],
+    );
+    Object.keys(this.providers).forEach((key) => delete this.providers[key]);
+    Object.keys(this.providerManifests).forEach(
+      (key) => delete this.providerManifests[key],
+    );
+    Object.keys(this.providerIcons).forEach(
+      (key) => delete this.providerIcons[key],
+    );
+    this._providerIconRequests.clear();
+    this._coreConfigValues.clear();
+    this.serverInfo.value = undefined;
+  }
+
+  public subscribe(
+    eventFilter: EventType,
+    callback: CallableFunction,
+    object_id: string = "*",
+  ) {
+    // subscribe a listener for events
+    // returns handle to remove the listener
+    const listener: [EventType, string, CallableFunction] = [
+      eventFilter,
+      object_id,
+      callback,
+    ];
+    this.eventCallbacks.push(listener);
+    const removeCallback = () => {
+      const index = this.eventCallbacks.indexOf(listener);
+      if (index > -1) {
+        this.eventCallbacks.splice(index, 1);
+      }
+    };
+    return removeCallback;
+  }
+
+  public subscribe_multi(
+    eventFilters: EventType[],
+    callback: CallableFunction,
+    object_id: string = "*",
+  ) {
+    // subscribe a listener for multiple events
+    // returns handle to remove the listener
+    const removeCallbacks: CallableFunction[] = [];
+    for (const eventFilter of eventFilters) {
+      removeCallbacks.push(this.subscribe(eventFilter, callback, object_id));
+    }
+    const removeCallback = () => {
+      for (const cb of removeCallbacks) {
+        cb();
+      }
+    };
+    return removeCallback;
+  }
+
+  /**
+   * Get Track listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of tracks
+   */
+  public getLibraryTracks(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    provider?: string | string[],
+    genre?: number | number[],
+  ): Promise<Track[]> {
+    return this.sendCommand("music/tracks/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      provider,
+      genre,
+    });
+  }
+
+  public getTrack(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    album_uri?: string,
+  ): Promise<Track> {
+    return this.sendCommand("music/tracks/get_track", {
+      item_id,
+      provider_instance_id_or_domain,
+      album_uri: album_uri,
+    });
+  }
+
+  public getTrackVersions(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/tracks/track_versions", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getTrackAlbums(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    in_library_only = false,
+  ): Promise<Album[]> {
+    return this.sendCommand("music/tracks/track_albums", {
+      item_id,
+      provider_instance_id_or_domain,
+      in_library_only,
+    });
+  }
+
+  public getSimilarTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    limit = 25,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/tracks/similar_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+      limit,
+    });
+  }
+
+  public getTrackPreviewUrl(
+    provider_instance_id_or_domain: string,
+    item_id: string,
+  ): Promise<string> {
+    return this.sendCommand("music/tracks/preview", {
+      provider_instance_id_or_domain,
+      item_id,
+    });
+  }
+
+  public getLibraryArtistsCount(
+    favorite_only: boolean = false,
+    album_artists_only: boolean = false,
+    artist_type?: ArtistType,
+  ): Promise<number> {
+    return this.sendCommand("music/artists/count", {
+      favorite_only,
+      album_artists_only,
+      artist_type,
+    });
+  }
+  public getLibraryAlbumsCount(
+    favorite_only: boolean = false,
+    album_types?: Array<AlbumType | string>,
+  ): Promise<number> {
+    return this.sendCommand("music/albums/count", {
+      favorite_only,
+      album_types,
+    });
+  }
+  public getLibraryTracksCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/tracks/count", { favorite_only });
+  }
+  public getLibraryPlaylistsCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/playlists/count", { favorite_only });
+  }
+  public getLibraryRadiosCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/radios/count", { favorite_only });
+  }
+
+  public getLibraryPodcastsCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/podcasts/count", { favorite_only });
+  }
+
+  public getLibraryAudiobooksCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/audiobooks/count", { favorite_only });
+  }
+
+  public getLibraryGenresCount(
+    favorite_only: boolean = false,
+  ): Promise<number> {
+    return this.sendCommand("music/genres/count", { favorite_only });
+  }
+
+  public getGenreMediaCounts(
+    genre_ids: string[],
+  ): Promise<Record<string, Record<string, number>>> {
+    return this.sendCommand("music/genres/media_counts", { genre_ids });
+  }
+
+  /**
+   * Get Artists listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param album_artists_only - Only return artists that have albums
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of artists
+   */
+  public getLibraryArtists(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    album_artists_only?: boolean,
+    provider?: string | string[],
+    genre?: number | number[],
+    artist_type?: ArtistType,
+  ): Promise<Artist[]> {
+    return this.sendCommand("music/artists/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      album_artists_only,
+      provider,
+      genre,
+      artist_type,
+    });
+  }
+
+  public getArtist(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Artist> {
+    return this.sendCommand("music/artists/get_artist", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getArtistTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/artists/artist_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+    });
+  }
+
+  public getArtistTopTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/artists/top_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+    });
+  }
+
+  public getArtistAlbums(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+  ): Promise<Album[]> {
+    return this.sendCommand("music/artists/artist_albums", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+    });
+  }
+
+  public getArtistAppearsOn(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+  ): Promise<Album[]> {
+    return this.sendCommand("music/artists/artist_appears_on", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+    });
+  }
+
+  public getArtistTopAlbums(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+  ): Promise<Album[]> {
+    return this.sendCommand("music/artists/top_albums", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+    });
+  }
+
+  /**
+   * Every album, EP and single MusicBrainz credits to a library artist, newest first.
+   *
+   * Only library artists are supported; the list is empty when MusicBrainz doesn't know
+   * the artist. The releases that are not in the library come back as MusicBrainz items
+   * (provider "musicbrainz", without provider mappings), which the server resolves to a
+   * real album when one is opened or added.
+   */
+  public getArtistDiscography(item_id: string): Promise<Album[]> {
+    return this.sendCommand("music/artists/discography", {
+      item_id,
+      provider_instance_id_or_domain: "library",
+    });
+  }
+
+  public getSimilarArtists(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    provider_filter?: string,
+    limit = 25,
+  ): Promise<Artist[]> {
+    return this.sendCommand("music/artists/similar_artists", {
+      item_id,
+      provider_instance_id_or_domain,
+      provider_filter,
+      limit,
+    });
+  }
+
+  public getArtistAudiobooks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    artist_type?: ArtistType,
+    in_library_only?: boolean,
+    collapse_collections?: boolean,
+  ): Promise<(Audiobook | MediaCollection<Audiobook>)[]> {
+    return this.sendCommand("music/artists/artist_audiobooks", {
+      item_id,
+      provider_instance_id_or_domain,
+      artist_type,
+      in_library_only,
+      collapse_collections,
+    });
+  }
+
+  public getLibraryArtistTypes(): Promise<ArtistType[]> {
+    return this.sendCommand("music/artists/library_artist_types");
+  }
+
+  /**
+   * Get Albums listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param album_types - Filter by album types
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of albums
+   */
+  public getLibraryAlbums(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    album_types?: Array<AlbumType | string>,
+    provider?: string | string[],
+    genre?: number | number[],
+  ): Promise<Album[]> {
+    return this.sendCommand("music/albums/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      album_types,
+      provider,
+      genre,
+    });
+  }
+
+  public getAlbum(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Album> {
+    return this.sendCommand("music/albums/get_album", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getAlbumTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    in_library_only = false,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/albums/album_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+      in_library_only,
+    });
+  }
+
+  public getAlbumVersions(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Album[]> {
+    return this.sendCommand("music/albums/album_versions", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  /**
+   * Get Playlists listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of playlists
+   */
+  public getLibraryPlaylists(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    provider?: string | string[],
+    genre?: number | number[],
+  ): Promise<Playlist[]> {
+    return this.sendCommand("music/playlists/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      provider,
+      genre,
+    });
+  }
+
+  public getPlaylist(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Playlist> {
+    return this.sendCommand("music/playlists/get_playlist", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public setPlaylistAccess(
+    item_id: string,
+    access: PlaylistAccess,
+  ): Promise<Playlist> {
+    // Set who owns a Music Assistant playlist, who may see it and who may edit it.
+    // A library manager may set this for any playlist, an owner may only
+    // change the sharing of a playlist it owns. The dialog reports a refused
+    // change itself, so opt out of the global error toast.
+    return this.sendCommand(
+      "music/playlists/set_access",
+      {
+        item_id,
+        owner: access.owner,
+        sharing: access.sharing,
+        shared_users: access.shared_users,
+        collaborative: access.collaborative,
+      },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public getPlaylistTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    force_refresh?: boolean,
+  ): Promise<(Track | Radio | PodcastEpisode | Audiobook)[]> {
+    return this.sendCommand("music/playlists/playlist_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+      force_refresh,
+    });
+  }
+
+  public addPlaylistTracks(
+    db_playlist_id: string | number,
+    uris: string[],
+  ): Promise<BackgroundTask> {
+    return this.sendCommand<BackgroundTask>(
+      "music/playlists/add_playlist_tracks",
+      {
+        db_playlist_id,
+        uris,
+      },
+    ).then((task) => {
+      this._notifyBackgroundTaskStarted(task);
+      return task;
+    });
+  }
+
+  public removePlaylistTracks(
+    db_playlist_id: string | number,
+    positions_to_remove: number[],
+  ): Promise<BackgroundTask> {
+    return this.sendCommand<BackgroundTask>(
+      "music/playlists/remove_playlist_tracks",
+      {
+        db_playlist_id,
+        positions_to_remove,
+      },
+    ).then((task) => {
+      this._notifyBackgroundTaskStarted(task);
+      return task;
+    });
+  }
+
+  public createPlaylist(
+    name: string,
+    provider_instance_or_domain?: string,
+    media_types?: MediaType[],
+  ): Promise<Playlist> {
+    return this.sendCommand("music/playlists/create_playlist", {
+      name,
+      provider_instance_or_domain,
+      media_types,
+    });
+  }
+
+  public updatePlaylist(
+    item_id: string | number,
+    update: Playlist,
+    overwrite: boolean = false,
+  ): Promise<Playlist> {
+    return this.sendCommand("music/playlists/update", {
+      item_id,
+      update,
+      overwrite,
+    });
+  }
+
+  public exportPlaylist(db_playlist_id: string | number): Promise<string> {
+    return this.sendCommand("music/playlists/export_playlist", {
+      db_playlist_id,
+    });
+  }
+
+  public importPlaylist(
+    m3u_data: string,
+    library_matching: boolean = true,
+    match_providers?: string[],
+    match_policy?: PlaylistMatchPolicy,
+  ): Promise<Playlist> {
+    return this.sendCommand("music/playlists/import_playlist", {
+      m3u_data,
+      library_matching,
+      match_providers,
+      match_policy,
+    });
+  }
+
+  public migratePlaylist(
+    db_playlist_id: string | number,
+    destination_provider: string,
+    match_policy: PlaylistMatchPolicy,
+    name?: string,
+  ): Promise<BackgroundTask> {
+    return this.sendCommand<BackgroundTask>(
+      "music/playlists/migrate_playlist",
+      {
+        db_playlist_id,
+        destination_provider,
+        match_policy,
+        name,
+      },
+      // the dialog shows its own error toast; avoid a duplicate global one.
+      { suppressGlobalError: true },
+    ).then((task) => {
+      this._notifyBackgroundTaskStarted(task);
+      return task;
+    });
+  }
+
+  public createSmartPlaylist(
+    name: string,
+    rules: SmartPlaylistRules,
+    is_dynamic: boolean = true,
+  ): Promise<Playlist> {
+    return this.sendCommand("smart_playlists/create", {
+      name,
+      rules,
+      is_dynamic,
+    });
+  }
+
+  public getSmartPlaylistRules(
+    db_playlist_id: string | number,
+  ): Promise<SmartPlaylistRules | null> {
+    return this.sendCommand("smart_playlists/get_rules", {
+      playlist_id: db_playlist_id,
+    });
+  }
+
+  public updateSmartPlaylistRules(
+    db_playlist_id: string | number,
+    rules: SmartPlaylistRules,
+  ): Promise<void> {
+    return this.sendCommand("smart_playlists/update_rules", {
+      playlist_id: db_playlist_id,
+      rules,
+    });
+  }
+
+  public countSmartPlaylistTracks(
+    rules: SmartPlaylistRules,
+  ): Promise<{ count: number; duration_seconds: number }> {
+    return this.sendCommand("smart_playlists/count_tracks", { rules });
+  }
+
+  /**
+   * Get Radio stations listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of radio stations
+   */
+  public getLibraryRadios(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    provider?: string | string[],
+    genre?: number | number[],
+  ): Promise<Radio[]> {
+    return this.sendCommand("music/radios/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      provider,
+      genre,
+    });
+  }
+
+  public getRadio(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Radio> {
+    return this.sendCommand("music/radios/get_radio", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getRadioVersions(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Radio[]> {
+    return this.sendCommand("music/radios/radio_versions", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getRadioTracks(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/radios/radio_tracks", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  // Audiobook related endpoints
+  /**
+   * Get Audiobooks listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of audiobooks
+   */
+  public getLibraryAudiobooks(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    provider?: string | string[],
+    genre?: number | number[],
+    collapse_collections?: boolean,
+  ): Promise<(Audiobook | MediaCollection<Audiobook>)[]> {
+    return this.sendCommand("music/audiobooks/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      provider,
+      genre,
+      collapse_collections,
+    });
+  }
+
+  public getAudiobook(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Audiobook> {
+    return this.sendCommand("music/audiobooks/get_audiobook", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getAudiobookCollection(
+    item_id: string,
+  ): Promise<MediaCollection<Audiobook>> {
+    return this.sendCommand("music/audiobooks/get_collection", {
+      item_id,
+    });
+  }
+
+  public getAudiobookVersions(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Audiobook[]> {
+    return this.sendCommand("music/audiobooks/audiobook_versions", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  // Podcast related endpoints
+  /**
+   * Get Podcasts listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @returns Promise resolving to array of podcasts
+   */
+  public getLibraryPodcasts(
+    favorite?: boolean,
+    search?: string,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+    provider?: string | string[],
+    genre?: number | number[],
+  ): Promise<Podcast[]> {
+    return this.sendCommand("music/podcasts/library_items", {
+      favorite,
+      search,
+      limit,
+      offset,
+      order_by,
+      provider,
+      genre,
+    });
+  }
+
+  /**
+   * Get Genres listing from the server.
+   * @param favorite - Filter by favorite status
+   * @param search - Filter by search query
+   * @param limit - Maximum number of items to return
+   * @param offset - Number of items to skip
+   * @param order_by - Order by field (e.g. 'sort_name', 'timestamp_added')
+   * @param provider - Filter by provider instance ID or domain (single string or list)
+   * @param genre - Filter by genre ID(s)
+   * @param hide_empty - Hide genres with no associated media items
+   * @param media_type - Filter to genres that have at least one item of this media type
+   * @returns Promise resolving to array of genres
+   */
+  public getLibraryGenres(
+    opts: {
+      favorite?: boolean;
+      search?: string;
+      limit?: number;
+      offset?: number;
+      order_by?: string;
+      provider?: string | string[];
+      genre?: number | number[];
+      hide_empty?: boolean | null;
+      media_type?: MediaType;
+      content_type?: MediaType | "music";
+    } = {},
+  ): Promise<Genre[]> {
+    return this.sendCommand("music/genres/library_items", opts);
+  }
+
+  public getGenre(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Genre> {
+    return this.sendCommand("music/genres/get", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public addGenreToLibrary(
+    item: Partial<Genre>,
+    overwrite_existing = false,
+  ): Promise<Genre> {
+    return this.sendCommand("music/genres/add", {
+      item,
+      overwrite_existing,
+    });
+  }
+
+  public removeGenreFromLibrary(item_id: string): Promise<void> {
+    return this.sendCommand("music/genres/remove", {
+      item_id,
+    });
+  }
+
+  public getGlobalGenreExclusions(): Promise<Genre[]> {
+    return this.sendCommand("music/genres/global_exclusions");
+  }
+
+  public removeGlobalGenreExclusion(genre_id: string): Promise<Genre> {
+    return this.sendCommand("music/genres/remove_global_exclusion", {
+      genre_id,
+    });
+  }
+
+  public restoreGenreDefaults(
+    fullRestore = false,
+    contentType?: "all" | "music" | "podcast" | "audiobook",
+  ): Promise<Genre[]> {
+    return this.sendCommand("music/genres/restore_defaults", {
+      full_restore: fullRestore,
+      content_type: contentType,
+    });
+  }
+
+  public triggerGenreScan(): Promise<{
+    status: "triggered" | "already_running";
+    message: string;
+    last_scan: number;
+  }> {
+    return this.sendCommand("music/genres/scan_mappings");
+  }
+
+  public addGenreAlias(genre_id: string, alias: string): Promise<Genre> {
+    return this.sendCommand("music/genres/add_alias", {
+      genre_id,
+      alias,
+    });
+  }
+
+  public removeGenreAlias(genre_id: string, alias: string): Promise<Genre> {
+    return this.sendCommand("music/genres/remove_alias", {
+      genre_id,
+      alias,
+    });
+  }
+
+  public promoteGenreAlias(genre_id: string, alias: string): Promise<Genre> {
+    return this.sendCommand("music/genres/promote_alias", {
+      genre_id,
+      alias,
+    });
+  }
+
+  public getGenresForMediaItem(
+    media_type: string,
+    media_id: string,
+  ): Promise<Genre[]> {
+    return this.sendCommand("music/genres/genres_for_media_item", {
+      media_type,
+      media_id,
+    });
+  }
+
+  public mergeGenres(
+    genre_ids: string[],
+    target_genre_id: string,
+  ): Promise<Genre> {
+    return this.sendCommand("music/genres/merge", {
+      genre_ids,
+      target_genre_id,
+    });
+  }
+
+  public addGenreMediaMapping(
+    genre_id: string,
+    media_type: string,
+    media_id: string,
+  ): Promise<void> {
+    return this.sendCommand("music/genres/add_media_mapping", {
+      genre_id,
+      media_type,
+      media_id,
+    });
+  }
+
+  public excludeGenreFromItem(
+    genre_id: string,
+    media_type: string,
+    media_id: string,
+  ): Promise<void> {
+    return this.sendCommand("music/genres/exclude_genre_from_media_item", {
+      genre_id,
+      media_type,
+      media_id,
+    });
+  }
+
+  public removeGenreExclusion(
+    genre_id: string,
+    media_type: string,
+    media_id: string,
+  ): Promise<void> {
+    return this.sendCommand("music/genres/remove_genre_exclusion", {
+      genre_id,
+      media_type,
+      media_id,
+    });
+  }
+
+  public getGenreExclusionsForItem(
+    media_type: string,
+    media_id: string,
+  ): Promise<Genre[]> {
+    return this.sendCommand("music/genres/genre_exclusions_for_media_item", {
+      media_type,
+      media_id,
+    });
+  }
+
+  public async getGenreOverviewRows(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<RecommendationFolder[]> {
+    return this.sendCommand("music/genres/overview", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getGenreTracks(
+    item_id: string | number,
+    limit?: number,
+    offset?: number,
+    order_by?: string,
+  ): Promise<Track[]> {
+    return this.sendCommand("music/genres/tracks", {
+      item_id,
+      limit,
+      offset,
+      order_by,
+    });
+  }
+
+  public getPodcast(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Podcast> {
+    return this.sendCommand("music/podcasts/get_podcast", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public gePodcastVersions(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<Podcast[]> {
+    return this.sendCommand("music/podcasts/podcast_versions", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getPodcastEpisodes(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<PodcastEpisode[]> {
+    return this.sendCommand("music/podcasts/podcast_episodes", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getPodcastEpisode(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<PodcastEpisode> {
+    // Get a single podcast episode.
+    return this.sendCommand("music/podcasts/podcast_episode", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getItemByUri(uri: string): Promise<MediaItemType> {
+    // Get single music item providing a mediaitem uri.
+    return this.sendCommand("music/item_by_uri", {
+      uri,
+    });
+  }
+
+  public refreshItem(
+    media_item: MediaItemType | ItemMapping,
+  ): Promise<MediaItemType> {
+    // Try to refresh a mediaitem by requesting it's full object or search for substitutes.
+    return this.sendCommand("music/refresh_item", {
+      media_item,
+    });
+  }
+
+  public updateMetadata(
+    item: MediaItemType | ItemMapping | string,
+    force_refresh = false,
+  ): Promise<MediaItemType> {
+    // Update an item's (extra) metadata.
+    return this.sendCommand("metadata/update_metadata", {
+      item,
+      force_refresh,
+    });
+  }
+
+  public getPodcastEpisodeTranscript(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<[string | null, TranscriptCue[] | null]> {
+    // Get a podcast episode's transcript as plain text plus timed lines.
+    return this.sendCommand("music/podcasts/podcast_episode_transcript", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getTrackLyrics(track: Track): Promise<[string | null, string | null]> {
+    // Get lyrics for a track.
+    // Returns a tuple of (lyrics, lrc_lyrics) - plain text and synced lyrics.
+    return this.sendCommand("metadata/get_track_lyrics", {
+      track,
+    });
+  }
+
+  public getWaveForm(
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<number[] | null> {
+    // Returns RMS energy bins normalized 0.0-1.0, or null when no analysis exists.
+    return this.sendCommand("audio_analysis/wave_form", {
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public getItem(
+    media_type: MediaType,
+    item_id: string,
+    provider_instance_id_or_domain: string,
+    options?: CommandOptions,
+  ): Promise<MediaItemType> {
+    // Get single music item by id and media type.
+    return this.sendCommand(
+      "music/item",
+      {
+        media_type,
+        item_id,
+        provider_instance_id_or_domain,
+      },
+      options,
+    );
+  }
+
+  public getLibraryItem(
+    media_type: MediaType,
+    item_id: string,
+    provider_instance_id_or_domain: string,
+  ): Promise<MediaItemType | null> {
+    // Get single music item by id and media type.
+    return this.sendCommand("music/get_library_item", {
+      media_type,
+      item_id,
+      provider_instance_id_or_domain,
+    });
+  }
+
+  public async addItemToLibrary(
+    item: string | MediaItemType | ItemMapping,
+    overwrite_existing = false,
+  ): Promise<void> {
+    // Add an item (uri or mediaitem) to the library.
+    return this.sendCommand("music/library/add_item", {
+      item,
+      overwrite_existing,
+    });
+  }
+
+  public async removeItemFromLibrary(
+    media_type: MediaType,
+    library_item_id: string | number,
+  ): Promise<void> {
+    // Remove an item from the library.
+    return this.sendCommand("music/library/remove_item", {
+      media_type,
+      library_item_id,
+    });
+  }
+
+  public async addItemToFavorites(
+    item: string | MediaItemType | ItemMapping,
+  ): Promise<void> {
+    // optimistically set the value on the caller's copy. Only a media item
+    // holds one: a summary item leaves the key out when there is no state, but
+    // its provider mappings are always there
+    if (typeof item !== "string" && "provider_mappings" in item) {
+      item.favorite = true;
+    }
+    // Add an item (uri or mediaitem) to the favorites.
+    return this.sendCommand("music/favorites/add_item", {
+      item,
+    });
+  }
+  public async removeItemFromFavorites(
+    media_type: MediaType,
+    library_item_id: string | number,
+  ): Promise<void> {
+    // Add an item (uri or mediaitem) to the favorites.
+    return this.sendCommand("music/favorites/remove_item", {
+      media_type,
+      library_item_id,
+    });
+  }
+
+  /**
+   * Set the signed-in user's state on a media item.
+   *
+   * :param item: The item (uri or media item) to set the state on.
+   * :param favorite: true to like, false to dislike, null to clear the state.
+   */
+  public async setFavorite(
+    item: string | MediaItemType | ItemMapping,
+    favorite: boolean | null,
+  ): Promise<void> {
+    // optimistically set the value on the caller's copy, which only a media
+    // item holds (see addItemToFavorites)
+    if (typeof item !== "string" && "provider_mappings" in item) {
+      item.favorite = favorite;
+    }
+    return this.sendCommand("music/favorites/set_item", {
+      item,
+      favorite,
+    });
+  }
+
+  public browse(
+    path?: string,
+    player_id?: string,
+    options?: CommandOptions,
+  ): Promise<MediaItemType[]> {
+    // Browse Music providers.
+    // player_id scopes player-bound audio sources to that player.
+    return this.sendCommand("music/browse", { path, player_id }, options);
+  }
+
+  public search(
+    search_query: string,
+    media_types?: MediaType[],
+    limit?: number,
+    providers?: string[],
+  ): Promise<SearchResults> {
+    // Perform global search for media items on the given providers.
+    // providers: provider instance ids/domains and/or "library";
+    // omit to search the library and all available providers combined.
+    return this.sendCommand("music/search", {
+      search_query,
+      media_types,
+      limit,
+      providers,
+    });
+  }
+
+  public async getRecentlyPlayedItems(
+    limit = 10,
+    media_types?: MediaType[],
+  ): Promise<ItemMapping[]> {
+    return this.sendCommand("music/recently_played_items", {
+      limit,
+      media_types,
+    });
+  }
+
+  public async getInProgressItems(limit = 10): Promise<ItemMapping[]> {
+    return this.sendCommand("music/in_progress_items", {
+      limit,
+    });
+  }
+
+  public async getRecommendations(): Promise<RecommendationFolder[]> {
+    // Returns every available row (with empty `items`) — the discover skeleton
+    // and row-toggle catalog in one fast, cacheable call.
+    return this.sendCommand("music/recommendations");
+  }
+
+  public async getDiscoveryArtists(
+    query?: string,
+    provider?: string,
+    cursor?: string,
+    limit = 24,
+  ): Promise<DiscoveryArtistPage> {
+    return this.sendCommand("music/discovery/artists", {
+      query,
+      provider,
+      cursor,
+      limit,
+    });
+  }
+
+  public async getRecommendationItems(
+    provider: string,
+    item_id: string,
+    providers?: string[],
+  ): Promise<MediaItemTypeOrItemMapping[]> {
+    // Fetches a single recommendation row's items. Per-row timeout/error
+    // isolation lives server-side: an unknown id or a failing provider
+    // resolves to `[]` rather than rejecting. Transport-level failures are
+    // best-effort per row (the caller degrades the row), so opt out of the
+    // global error toast.
+    // providers: source provider instance ids to include (only rows with
+    // supports_provider_filter accept this); omit for the unfiltered row.
+    return this.sendCommand(
+      "music/recommendations/items",
+      {
+        provider,
+        item_id,
+        providers,
+      },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public async getSoundEffects(): Promise<SoundEffect[]> {
+    // Fetch all sound effect items from providers that offer them.
+    return this.sendCommand("music/sound_effects");
+  }
+
+  public async addAmbientSound(
+    url: string,
+    name: string,
+  ): Promise<SoundEffect> {
+    // Add a custom ambient sound (stream url) to the ambient sounds provider.
+    // The server probes the url and rejects it if it is not playable audio;
+    // that is an expected failure the calling dialog handles itself, so opt
+    // out of the global error toast.
+    return this.sendCommand(
+      "ambient_sounds/add_sound",
+      { url, name },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public async removeAmbientSound(url: string): Promise<void> {
+    // Remove a previously added custom ambient sound by its stream url.
+    return this.sendCommand("ambient_sounds/remove_sound", { url });
+  }
+
+  public markItemPlayed(
+    media_item: MediaItemTypeOrItemMapping,
+    fully_played?: boolean,
+    seconds_played?: number,
+    options?: CommandOptions,
+  ): Promise<void> {
+    // optimistically update the local object so the UI reflects the new state;
+    // keep resume_position_ms present (instead of deleting the key) because
+    // parts of the UI check for the key's existence on the item
+    if (itemSupportsPlayLog(media_item)) {
+      media_item.fully_played = fully_played;
+      media_item.resume_position_ms = (seconds_played ?? 0) * 1000;
+    }
+    // Mark item as played in the playlog
+    return this.sendCommand(
+      "music/mark_played",
+      {
+        media_item,
+        fully_played,
+        seconds_played,
+      },
+      options,
+    );
+  }
+  public markItemUnPlayed(
+    media_item: MediaItemTypeOrItemMapping,
+    options?: CommandOptions,
+  ): Promise<void> {
+    // optimistically update the local object so the UI reflects the new state
+    if (itemSupportsPlayLog(media_item)) {
+      media_item.fully_played = false;
+      media_item.resume_position_ms = 0;
+    }
+    // Mark item as unplayed in the playlog
+    return this.sendCommand(
+      "music/mark_unplayed",
+      {
+        media_item,
+      },
+      options,
+    );
+  }
+
+  // PlayerQueue related functions/commands
+
+  public async getPlayerQueues(): Promise<PlayerQueue[]> {
+    // Get all registered PlayerQueues
+    return this.sendCommand("player_queues/all");
+  }
+
+  public getPlayerQueueItems(
+    queue_id: string,
+    limit: number,
+    offset: number,
+  ): Promise<QueueItem[]> {
+    // Get all QueueItems for given PlayerQueue
+    return this.sendCommand("player_queues/items", {
+      queue_id,
+      limit,
+      offset,
+    });
+  }
+  public queueCommandClear(queueId: string) {
+    // Clear all items in the queue.
+    this.playerQueueCommand(queueId, "clear");
+  }
+  public queueCommandPlayIndex(queueId: string, index: number | string) {
+    // Play item at index (or item_id) X in queue.
+    this.playerQueueCommand(queueId, "play_index", { index });
+  }
+  public queueCommandMoveItem(
+    queueId: string,
+    queue_item_id: string,
+    pos_shift = 1,
+  ) {
+    // Move queue item x up/down the queue.
+    // - queue_id: id of the queue to process this request.
+    // - queue_item_id: the item_id of the queueitem that needs to be moved.
+    // - pos_shift: move item x positions down if positive value
+    // - pos_shift: move item x positions up if negative value
+    // - pos_shift:  move item to top of queue as next item if 0
+    this.playerQueueCommand(queueId, "move_item", { queue_item_id, pos_shift });
+  }
+  public queueCommandMoveItemEnd(queueId: string, queue_item_id: string) {
+    // Move queue item to the end of the queue.
+    // - queue_id: id of the queue to process this request.
+    // - queue_item_id: the item_id of the queueitem that needs to be moved.
+    this.playerQueueCommand(queueId, "move_item_end", { queue_item_id });
+  }
+  public queueCommandMoveUp(queueId: string, queue_item_id: string) {
+    this.queueCommandMoveItem(queueId, queue_item_id, -1);
+  }
+  public queueCommandMoveDown(queueId: string, queue_item_id: string) {
+    this.queueCommandMoveItem(queueId, queue_item_id, 1);
+  }
+  public queueCommandMoveNext(queueId: string, queue_item_id: string) {
+    this.queueCommandMoveItem(queueId, queue_item_id, 0);
+  }
+  public queueCommandDelete(
+    queueId: string,
+    item_id_or_index: number | string,
+  ) {
+    // Delete item (by id or index) from the queue.
+    this.playerQueueCommand(queueId, "delete_item", { item_id_or_index });
+  }
+
+  public queueCommandSeek(queueId: string, position: number) {
+    // Handle SEEK command for given queue.
+    // - position: position in seconds to seek to in the current playing item.
+    this.playerQueueCommand(queueId, "seek", { position });
+  }
+  public queueCommandSkip(queueId: string, seconds: number) {
+    // Handle SKIP command for given queue.
+    // - seconds: number of seconds to skip in track. Use negative value to skip back.
+    this.playerQueueCommand(queueId, "skip", { seconds });
+  }
+  public queueCommandSkipAhead(queueId: string) {
+    this.queueCommandSkip(queueId, 10);
+  }
+  public queueCommandSkipBack(queueId: string) {
+    this.queueCommandSkip(queueId, -10);
+  }
+  public queueCommandShuffle(queueId: string, shuffle_enabled: boolean) {
+    // Configure shuffle setting on the the queue.
+    this.playerQueueCommand(queueId, "shuffle", { shuffle_enabled });
+  }
+  public queueCommandRepeat(queueId: string, repeat_mode: RepeatMode) {
+    // Configure repeat setting on the the queue.
+    this.playerQueueCommand(queueId, "repeat", { repeat_mode });
+  }
+  public queueCommandCrossfade(queueId: string, crossfade_enabled: boolean) {
+    // Enable or disable crossfade on the queue.
+    this.playerQueueCommand(queueId, "crossfade", { crossfade_enabled });
+  }
+  public queueCommandCrossfadeToggle(queueId: string) {
+    // Toggle crossfade on/off for a queue
+    this.queueCommandCrossfade(
+      queueId,
+      !this.queues[queueId].crossfade_enabled,
+    );
+  }
+  public queueCommandAutoplay(queueId: string, autoplay_enabled: boolean) {
+    // Configure autoplay setting on the the queue.
+    this.playerQueueCommand(queueId, "autoplay", {
+      autoplay_enabled,
+    });
+  }
+  public queueCommandAutoplayToggle(queueId: string) {
+    // Toggle autoplay mode of a queue
+    this.queueCommandAutoplay(queueId, !this.queues[queueId].autoplay_enabled);
+  }
+  public queueCommandOverlay(
+    queueId: string,
+    args: { enabled?: boolean; source?: string; volume?: number },
+  ) {
+    // Configure the audio overlay (a looping sound effect mixed into playback) on the queue.
+    // source is the uri of a sound effect item; volume is the overlay loudness
+    // relative to the music in percent (0-200). Omitted args are left unchanged.
+    this.playerQueueCommand(queueId, "overlay", args);
+  }
+  public queueCommandSetPlaybackSpeed(
+    queue_id: string,
+    speed: number,
+    queue_item_id: string,
+  ) {
+    this.playerQueueCommand(queue_id, "set_playback_speed", {
+      speed,
+      queue_item_id,
+    });
+  }
+  public playerQueueCommand(
+    queue_id: string,
+    command: string,
+    args?: Record<string, unknown>,
+  ) {
+    /*
+      Handle (throttled) command to player
+    */
+    this._sendCommand(`player_queues/${command}`, {
+      queue_id,
+      ...args,
+    });
+  }
+  public queueCommandTransfer(
+    sourceQueue: string,
+    targetQueue: string,
+    autoPlay?: boolean,
+  ) {
+    // Transfer queue to another queue.
+    this._sendCommand("player_queues/transfer", {
+      source_queue_id: sourceQueue,
+      target_queue_id: targetQueue,
+      auto_play: autoPlay,
+    });
+  }
+  public queueCommandSaveAsPlaylist(
+    queueId: string,
+    name: string,
+    options: { showBackgroundTaskToast?: boolean } = {},
+  ): Promise<BackgroundTask> {
+    // Save the current queue items as a new playlist.
+    return this.sendCommand<BackgroundTask>("player_queues/save_as_playlist", {
+      queue_id: queueId,
+      name,
+    }).then((task) => {
+      if (options.showBackgroundTaskToast !== false) {
+        this._notifyBackgroundTaskStarted(task);
+      }
+      return task;
+    });
+  }
+
+  // Player related functions/commands
+
+  public async getPlayers(): Promise<Player[]> {
+    // Get all registered players.
+    return this.sendCommand("players/all");
+  }
+  public async getPlayer(player_id: string): Promise<Player> {
+    return this.sendCommand("players/get", {
+      player_id,
+      raise_unavailable: true,
+    });
+  }
+
+  public playerCommandPlay(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "play");
+  }
+  public playerCommandPause(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "pause");
+  }
+  public playerCommandPlayPause(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "play_pause");
+  }
+  public playerCommandStop(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "stop");
+  }
+  public playerCommandNext(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "next");
+  }
+  public playerCommandPrevious(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "previous");
+  }
+  public playerCommandSeek(playerId: string, position: number) {
+    this.playerCommand(playerId, "seek", { position });
+  }
+  /**
+   * Set shuffle on whatever a player is playing.
+   *
+   * A live external source orders its own session, an MA queue orders its own
+   * items. Pass the source the command was aimed at (`resolveActiveSourceId`):
+   * the server refuses it when that source is no longer the one playing, which
+   * is the guard doing its job rather than a failure to report, so that refusal
+   * alone stays quiet. Anything else that went wrong is toasted as usual.
+   */
+  public playerCommandShuffle(
+    playerId: string,
+    shuffle_enabled: boolean,
+    source_id: string,
+  ): Promise<void> {
+    return this.playerCommand(
+      playerId,
+      "shuffle",
+      { shuffle_enabled, source_id },
+      { suppressGlobalError: () => this.hasMovedOnFrom(playerId, source_id) },
+    ).catch(() => undefined);
+  }
+  /**
+   * Set the repeat mode on whatever a player is playing.
+   *
+   * Takes and refuses `source_id` the same way {@link playerCommandShuffle}
+   * does.
+   */
+  public playerCommandRepeat(
+    playerId: string,
+    repeat_mode: RepeatMode,
+    source_id: string,
+  ): Promise<void> {
+    return this.playerCommand(
+      playerId,
+      "repeat",
+      { repeat_mode, source_id },
+      { suppressGlobalError: () => this.hasMovedOnFrom(playerId, source_id) },
+    ).catch(() => undefined);
+  }
+
+  public playerCommandPower(playerId: string, powered: boolean): Promise<void> {
+    return this.playerCommand(playerId, "power", { powered });
+  }
+
+  public playerCommandPowerToggle(playerId: string): Promise<void> {
+    return this.playerCommandPower(playerId, !this.players[playerId].powered);
+  }
+
+  public async playerCommandVolumeSet(playerId: string, newVolume: number) {
+    newVolume = Math.max(newVolume, 0);
+    newVolume = Math.min(newVolume, 100);
+
+    await this.playerCommand(playerId, "volume_set", {
+      volume_level: newVolume,
+    });
+    this.players[playerId].volume_level = newVolume;
+  }
+  public playerCommandVolumeUp(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "volume_up");
+  }
+  public playerCommandVolumeDown(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "volume_down");
+  }
+  public playerCommandVolumeMute(
+    playerId: string,
+    muted: boolean,
+  ): Promise<void> {
+    return this.playerCommand(playerId, "volume_mute", {
+      muted,
+    });
+  }
+
+  public playerCommandMuteToggle(playerId: string): Promise<void> {
+    return this.playerCommandVolumeMute(
+      playerId,
+      !this.players[playerId].volume_muted,
+    );
+  }
+
+  public playerCommandSetMembers(
+    target_player: string,
+    player_ids_to_add?: string[],
+    player_ids_to_remove?: string[],
+  ): Promise<void> {
+    /*
+      Join/unjoin given player(s) to/from target player.
+
+      Will add the given player(s) to the target player (sync leader or group player).
+
+      - target_player: player_id of the syncgroup leader or group player.
+      - player_ids_to_add: List of player_id's to add to the target player.
+      - player_ids_to_remove: List of player_id's to remove from the target player.
+    */
+    return this.playerCommand(target_player, "set_members", {
+      target_player,
+      player_ids_to_add,
+      player_ids_to_remove,
+    });
+  }
+
+  public playerCommandGroup(
+    playerId: string,
+    target_player: string,
+  ): Promise<void> {
+    /*
+      Handle GROUP command for given player.
+
+      Join/add the given player(id) to the given (leader) player/sync group.
+      If the target player itself is already synced to another player, this may fail.
+      If the player can not be synced with the given target player, this may fail.
+
+          - player_id: player_id of the player to handle the command.
+          - target_player: player_id of the syncgroup leader or group player.
+    */
+    return this.playerCommand(playerId, "group", {
+      target_player,
+    });
+  }
+
+  public playerCommandUnGroup(playerId: string): Promise<void> {
+    /*
+      Handle UNGROUP command for given player.
+
+      Remove the given player from any (sync)groups it currently is synced to.
+      If the player is not currently grouped to any other player,
+      this will silently be ignored.
+
+          - player_id: player_id of the player to handle the command.
+    */
+    return this.playerCommand(playerId, "ungroup");
+  }
+
+  public playerCommandSelectSoundMode(
+    playerId: string,
+    soundMode: string,
+  ): Promise<void> {
+    /*
+      Handle SELECT_SOUND_MODE on given player
+          - playerId: playerId of the player to handle the command.
+          - soundMode: selected sound mode
+    */
+    return this.playerCommand(playerId, "select_sound_mode", {
+      sound_mode: soundMode,
+    });
+  }
+
+  public playerCommandSetOption(
+    playerId: string,
+    optionKey: string,
+    optionValue: PlayerOptionValueType,
+  ): Promise<void> {
+    /*
+      Handle SET_OPTION on given player
+          - playerId: playerId of the player to handle the command.
+          - optionKey: the option's key
+          - optionValue: the option's new value
+    */
+    return this.playerCommand(playerId, "set_option", {
+      option_key: optionKey,
+      option_value: optionValue,
+    });
+  }
+
+  public playerCommandPlayAnnouncement(
+    playerId: string,
+    message: string,
+    options?: {
+      preAnnounce?: boolean;
+      volumeLevel?: number;
+      ttsEngine?: string;
+    },
+  ): Promise<void> {
+    /*
+      Handle PLAY_ANNOUNCEMENT on given player.
+          - playerId: playerId of the player to handle the command.
+          - message: text to speak as the announcement.
+          - options.preAnnounce: play the chime before the message.
+          - options.volumeLevel: volume level to play the announcement at.
+          - options.ttsEngine: uid of the engine that speaks the message.
+      Omitted options fall back to the player's announcement settings.
+    */
+    return this.playerCommand(playerId, "play_announcement", {
+      message,
+      pre_announce: options?.preAnnounce,
+      volume_level: options?.volumeLevel,
+      tts_engine: options?.ttsEngine,
+    });
+  }
+
+  public getAnnouncementTtsEngines(): Promise<AnnouncementTtsEngine[]> {
+    /*
+      Get the TTS engines that can speak an announcement.
+      Prefetched in the background, so a failure is not worth a toast:
+      it leaves the announcement entry hidden until a later attempt.
+    */
+    return this.sendCommand("players/tts_engines", undefined, {
+      suppressGlobalError: true,
+    });
+  }
+
+  public playerCommand(
+    player_id: string,
+    command: string,
+    args?: Record<string, unknown>,
+    options?: CommandOptions,
+  ): Promise<void> {
+    /*
+      Handle command to player
+    */
+    return this.sendCommand(
+      `players/cmd/${command}`,
+      {
+        player_id,
+        ...args,
+      },
+      options,
+    );
+  }
+
+  public removePlayer(playerId: string): Promise<void> {
+    return this.sendCommand("players/remove", { player_id: playerId });
+  }
+
+  // Sleep timer related functions/commands
+
+  public getSleepTimer(playerId: string): Promise<number | null> {
+    /*
+      Return the active sleep timer expiry (unix utc timestamp) or null.
+    */
+    return this.sendCommand("players/sleep_timer/get", {
+      player_id: playerId,
+    });
+  }
+
+  public setSleepTimer(playerId: string, seconds: number): Promise<number> {
+    /*
+      Set a sleep timer that stops playback after the given number of seconds.
+      Returns the expiry (unix utc timestamp).
+    */
+    return this.sendCommand("players/sleep_timer/set", {
+      player_id: playerId,
+      seconds,
+    });
+  }
+
+  public clearSleepTimer(playerId: string): Promise<void> {
+    /*
+      Clear the active sleep timer for the given player.
+    */
+    return this.sendCommand("players/sleep_timer/clear", {
+      player_id: playerId,
+    });
+  }
+
+  // PlayerGroup related functions/commands
+
+  public playerCommandGroupVolume(playerId: string, newVolume: number) {
+    /*
+      Send VOLUME_SET command to given playergroup.
+
+      Will send the new (average) volume level to group child's.
+        - playerId: player_id of the playergroup to handle the command.
+        - newVolume: volume level (0..100) to set on the player.
+    */
+    this.playerCommand(playerId, "group_volume", {
+      volume_level: newVolume,
+    });
+    this.players[playerId].group_volume = newVolume;
+  }
+  public playerCommandGroupVolumeUp(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "group_volume_up");
+  }
+  public playerCommandGroupVolumeDown(playerId: string): Promise<void> {
+    return this.playerCommand(playerId, "group_volume_down");
+  }
+
+  public playerCommandGroupVolumeMute(
+    playerId: string,
+    muted: boolean,
+  ): Promise<void> {
+    return this.playerCommand(playerId, "group_volume_mute", {
+      muted,
+    });
+  }
+
+  public async createPlayerGroup(
+    provider: string,
+    name: string,
+    members: string[],
+    dynamic = false,
+  ): Promise<Player> {
+    // Create a new Sync playergroup
+    return this.sendCommand("players/create_group_player", {
+      provider,
+      name,
+      members,
+      dynamic,
+    });
+  }
+
+  public playerCommandGroupSelectSource(
+    playerId: string,
+    source: string,
+  ): Promise<void> {
+    return this.playerCommand(playerId, "select_source", { source });
+  }
+
+  // Play Media related functions
+
+  public playMedia(
+    media:
+      | MediaItemTypeOrItemMapping
+      | MediaItemTypeOrItemMapping[]
+      | string
+      | string[],
+    option?: QueueOption,
+    options: PlayMediaOptions = {},
+  ): Promise<void> {
+    let queue_id = options.queue_id;
+    if (
+      !queue_id &&
+      store.activePlayer?.active_source &&
+      store.activePlayer?.active_source in this.queues
+    ) {
+      queue_id = store.activePlayer?.active_source;
+    } else if (!queue_id) {
+      queue_id = store.activePlayer?.player_id;
+    }
+    return this.sendCommand("player_queues/play_media", {
+      queue_id,
+      media,
+      option,
+      start_item: options.start_item,
+      sort_by: options.sort_by,
+      start_from_beginning: options.start_from_beginning,
+      shuffle: options.shuffle,
+    });
+  }
+
+  // ProviderConfig related functions
+
+  public async getProviderConfigs(
+    provider_type?: ProviderType,
+    provider_domain?: string,
+  ): Promise<ProviderConfig[]> {
+    // Return all known provider configurations, optionally filtered by ProviderType or domain.
+    return this.sendCommand("config/providers", {
+      provider_type,
+      provider_domain,
+    });
+  }
+
+  public async getProviderConfig(instance_id: string): Promise<ProviderConfig> {
+    // Return configuration for a single provider.
+    return this.sendCommand("config/providers/get", { instance_id });
+  }
+
+  public async getProviderConfigEntries(
+    instance_id: string,
+  ): Promise<ConfigEntry[]> {
+    // Return the config (options) entries for an existing provider instance.
+    return this.sendCommand("config/providers/get_entries", {
+      instance_id,
+    });
+  }
+
+  public async invokeProviderConfigAction(
+    instance_id: string,
+    action: string,
+  ): Promise<ConfigEntry[] | ConfigActionResult> {
+    // Run a one-shot action button from a provider's options.
+    // Returns either the (re-rendered) config entries, or a result
+    // reporting the outcome of the action.
+    return this.sendCommand("config/providers/invoke_action", {
+      instance_id,
+      action,
+    });
+  }
+
+  public async saveProviderConfig(
+    provider_domain: string,
+    values: Record<string, ConfigValueType>,
+    instance_id?: string,
+    options?: CommandOptions,
+  ): Promise<ProviderConfig> {
+    // Save Provider(instance) Config.
+    // provider_domain: (mandatory) domain of the provider.
+    // values: the raw values for config entries that need to be stored/updated.
+    // instance_id: id of an existing provider instance (None for new instance setup).
+    // action: [optional] action key called from config entries UI.
+    return this.sendCommand(
+      "config/providers/save",
+      {
+        provider_domain,
+        values,
+        instance_id,
+      },
+      options,
+    );
+  }
+
+  public removeProviderConfig(instance_id: string): Promise<void> {
+    // Remove ProviderConfig. Callers report a failed removal themselves, so
+    // opt out of the global error toast.
+    return this.sendCommand(
+      "config/providers/remove",
+      {
+        instance_id,
+      },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public reloadProvider(instance_id: string): Promise<void> {
+    // Reload Provider(instance).
+    return this.sendCommand("config/providers/reload", {
+      instance_id,
+    });
+  }
+
+  public setProviderAccess(
+    instance_id: string,
+    access: ProviderAccess,
+  ): Promise<ProviderConfig> {
+    // Set who owns a music source and who else may use it.
+    // An admin may set this for any music source, an owner may
+    // only change the sharing of a source it owns. The dialog reports a
+    // refused change itself, so opt out of the global error toast.
+    return this.sendCommand(
+      "config/providers/set_access",
+      {
+        instance_id,
+        owner: access.owner,
+        sharing: access.sharing,
+        shared_users: access.shared_users,
+      },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public getShareCandidates(): Promise<UserSummary[]> {
+    // Get the users a music source or playlist can be shared with, the caller
+    // included.
+    return this.sendCommand("config/providers/share_candidates", undefined, {
+      // callers show their own error toast; avoid a duplicate global one
+      suppressGlobalError: true,
+    });
+  }
+
+  // PlayerConfig related functions
+
+  public async getPlayerConfigs(
+    provider?: string,
+    include_values?: boolean,
+    include_unavailable?: boolean,
+    include_disabled?: boolean,
+  ): Promise<PlayerConfig[]> {
+    // Return all known player configurations, optionally filtered by provider domain.
+    return this.sendCommand("config/players", {
+      provider,
+      include_values,
+      include_unavailable,
+      include_disabled,
+    });
+  }
+
+  public async getPlayerConfig(player_id: string): Promise<PlayerConfig> {
+    // Return configuration for a single player.
+    return this.sendCommand("config/players/get", { player_id });
+  }
+
+  public async getPlayerConfigEntries(
+    player_id: string,
+  ): Promise<ConfigEntry[]> {
+    // Return the config entries to configure a player.
+    return this.sendCommand("config/players/get_entries", {
+      player_id,
+    });
+  }
+
+  public async invokePlayerConfigAction(
+    player_id: string,
+    action: string,
+  ): Promise<ConfigEntry[] | ConfigActionResult> {
+    // Run a one-shot action button from a player's config.
+    // Returns either the (re-rendered) config entries, or a result
+    // reporting the outcome of the action.
+    return this.sendCommand("config/players/invoke_action", {
+      player_id,
+      action,
+    });
+  }
+
+  public async getPlayerConfigValue(
+    player_id: string,
+    key: string,
+  ): Promise<ConfigValueType> {
+    // Return single configentry value for a player.
+    return this.sendCommand("config/players/get_value", { player_id, key });
+  }
+
+  public async savePlayerConfig(
+    player_id: string,
+    values: Record<string, ConfigValueType>,
+  ): Promise<PlayerConfig> {
+    // Save/update PlayerConfig.
+    return this.sendCommand("config/players/save", {
+      player_id,
+      values,
+    });
+  }
+
+  public removePlayerConfig(player_id: string): Promise<void> {
+    // remove the configuration of a player
+    return this.sendCommand("config/players/remove", {
+      player_id,
+    });
+  }
+
+  // Setup flow related functions
+
+  public setupProvider(provider_domain: string): Promise<SetupFlowStep> {
+    // Start the setup flow to add a new instance of the given provider.
+    // Returns the flow's first step (may already be a FINISH/ABORT step).
+    return this.sendCommand("config/providers/setup", { provider_domain });
+  }
+
+  public reconfigureProvider(instance_id: string): Promise<SetupFlowStep> {
+    // Start the reconfigure flow on an existing provider instance (covers reauth).
+    return this.sendCommand("config/providers/reconfigure", { instance_id });
+  }
+
+  public setupPlayer(player_id: string): Promise<SetupFlowStep> {
+    // Start the setup flow for a player (e.g. pairing).
+    return this.sendCommand("config/players/setup", { player_id });
+  }
+
+  public submitSetupFlow(
+    flow_id: string,
+    values: Record<string, ConfigValueType>,
+  ): Promise<SetupFlowStep> {
+    // Submit the user's values for the flow's pending FORM step.
+    // Returns the next step, or the same FORM step (with per-field errors) on validation failure.
+    return this.sendCommand("config/flows/submit", { flow_id, values });
+  }
+
+  public getSetupFlow(flow_id: string): Promise<SetupFlowStep> {
+    // Return the current step of a running flow (idempotent re-render, never advances).
+    // Rejects when the flow no longer exists; the caller handles that (e.g. show abort).
+    return this.sendCommand(
+      "config/flows/get",
+      { flow_id },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public abortSetupFlow(flow_id: string): Promise<void> {
+    // Abort a running flow (user cancelled). Best-effort: a stale/finished flow is ignored.
+    return this.sendCommand(
+      "config/flows/abort",
+      { flow_id },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public subscribeSetupFlow(
+    flow_id: string,
+    callback: (step: SetupFlowStep) => void,
+  ): () => void {
+    // Subscribe to step changes for a specific running flow (external/progress steps
+    // advance via this push). Returns a handle to remove the listener.
+    return this.subscribe(
+      EventType.SETUP_FLOW_UPDATED,
+      (evt: EventMessage) => callback(evt.data as SetupFlowStep),
+      flow_id,
+    ) as () => void;
+  }
+
+  // PlayerQueue Config related functions
+
+  public async getPlayerQueueConfig(
+    queue_id: string,
+  ): Promise<PlayerQueueConfig> {
+    // Return configuration for a single queue.
+    return this.sendCommand("config/player_queues/get", { queue_id });
+  }
+
+  public async getPlayerQueueConfigEntries(
+    queue_id: string,
+    action?: string,
+    values?: Record<string, ConfigValueType>,
+  ): Promise<ConfigEntry[]> {
+    // Return Config entries to configure a queue.
+    return this.sendCommand("config/player_queues/get_entries", {
+      queue_id,
+      action,
+      values,
+    });
+  }
+
+  public async savePlayerQueueConfig(
+    queue_id: string,
+    values: Record<string, ConfigValueType>,
+  ): Promise<PlayerQueueConfig> {
+    // Save/update PlayerQueueConfig.
+    return this.sendCommand("config/player_queues/save", {
+      queue_id,
+      values,
+    });
+  }
+
+  // DSP related functions
+
+  public async getDSPConfig(player_id: string): Promise<DSPConfig> {
+    // Return the DSP configuration for a player.
+    return this.sendCommand("config/players/dsp/get", { player_id });
+  }
+
+  public async saveDSPConfig(
+    player_id: string,
+    config: DSPConfig,
+  ): Promise<DSPConfig> {
+    // Save/update the DSP configuration for a player.
+    return this.sendCommand("config/players/dsp/save", {
+      player_id,
+      config,
+    });
+  }
+
+  public async applyDSPPreset(
+    player_id: string,
+    preset_id: string,
+  ): Promise<DSPConfig> {
+    return this.sendCommand("config/players/dsp/apply_preset", {
+      player_id,
+      preset_id,
+    });
+  }
+
+  public async getDSPPresets(
+    suppressGlobalError = false,
+  ): Promise<DSPConfigPreset[]> {
+    // Return all known DSP presets
+    return this.sendCommand(
+      "config/dsp_presets/get",
+      undefined,
+      suppressGlobalError ? { suppressGlobalError: true } : undefined,
+    );
+  }
+
+  public async saveDSPPreset(
+    preset: DSPConfigPreset,
+  ): Promise<DSPConfigPreset> {
+    // Save a DSP preset.
+    return this.sendCommand("config/dsp_presets/save", { preset });
+  }
+
+  public async removeDSPPreset(presetId: string): Promise<void> {
+    // Remove a DSP preset.
+    return this.sendCommand("config/dsp_presets/remove", {
+      preset_id: presetId,
+    });
+  }
+
+  public async getDSPIRs(
+    suppressGlobalError = false,
+  ): Promise<DSPIRMetadata[]> {
+    // Return the metadata of all stored impulse responses.
+    return this.sendCommand(
+      "config/dsp_irs/list",
+      undefined,
+      suppressGlobalError ? { suppressGlobalError: true } : undefined,
+    );
+  }
+
+  public async uploadDSPIR(name: string, data: string): Promise<DSPIRMetadata> {
+    // Store an impulse response. `data` is the raw file, base64 encoded.
+    // Errors (size limit, invalid base64, not valid audio) are surfaced by the
+    // caller, so skip the global error toast.
+    return this.sendCommand(
+      "config/dsp_irs/upload",
+      { name, data },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public async removeDSPIR(irId: string): Promise<void> {
+    // Remove a stored impulse response. The server blanks the ir_id of every
+    // convolution filter that referenced it.
+    return this.sendCommand("config/dsp_irs/remove", { ir_id: irId });
+  }
+
+  // Core Config related functions
+
+  public async getCoreConfigs(): Promise<CoreConfig[]> {
+    // Return all known core configurations
+    return this.sendCommand("config/core");
+  }
+
+  public async getCoreConfig(domain: string): Promise<CoreConfig> {
+    // Return configuration for a single core controller.
+    return this.sendCommand("config/core/get", { domain });
+  }
+
+  public getCoreConfigValue(
+    domain: string,
+    key: string,
+  ): Promise<ConfigValueType> {
+    // Return value for a single core controller config entry.
+    // Cached (see _coreConfigValues) because these steer interactions such as clicking
+    // a media item, which must not wait for a round-trip on every click.
+    const cacheKey = `${domain}/${key}`;
+    let request = this._coreConfigValues.get(cacheKey);
+    if (!request) {
+      request = this.sendCommand<ConfigValueType>("config/core/get_value", {
+        domain,
+        key,
+      }).catch((err) => {
+        // a failed read must not be remembered as the value
+        this._coreConfigValues.delete(cacheKey);
+        throw err;
+      });
+      this._coreConfigValues.set(cacheKey, request);
+    }
+    return request;
+  }
+
+  public async getCoreConfigEntries(domain: string): Promise<ConfigEntry[]> {
+    // Return Config entries to configure a core controller.
+    return this.sendCommand("config/core/get_entries", { domain });
+  }
+
+  public async invokeCoreConfigAction(
+    domain: string,
+    action: string,
+  ): Promise<ConfigEntry[] | ConfigActionResult> {
+    // Run a one-shot action button from a core module's config.
+    // Returns either the (re-rendered) config entries, or a result
+    // reporting the outcome of the action.
+    return this.sendCommand("config/core/invoke_action", { domain, action });
+  }
+
+  public async saveCoreConfig(
+    domain: string,
+    values: Record<string, ConfigValueType>,
+  ): Promise<CoreConfig> {
+    // Save Core controller Config.
+    // domain: (mandatory) domain of the core controller.
+    // values: the raw values for config entries that need to be stored/updated.
+    // action: [optional] action key called from config entries UI.
+    const config = await this.sendCommand<CoreConfig>("config/core/save", {
+      domain,
+      values,
+    });
+    this._coreConfigValues.clear();
+    return config;
+  }
+
+  public reloadCoreController(domain: string): Promise<void> {
+    // Reload Core controller.
+    return this.sendCommand("config/core/reload", {
+      domain,
+    });
+  }
+
+  // Other (utility) functions
+
+  public startSync(
+    media_types?: MediaType[],
+    providers?: string[],
+  ): Promise<BackgroundTask[]> {
+    // Start running the sync of (all or selected) musicproviders.
+    // media_types: only sync these media types. omit for all.
+    // providers: only sync these provider domains. omit for all.
+    return this.sendCommand<BackgroundTask[]>("music/sync", {
+      media_types,
+      providers,
+    }).then((tasks) => {
+      this._notifyBackgroundTaskStarted(tasks);
+      return tasks;
+    });
+  }
+
+  public getTasks(): Promise<BackgroundTask[]> {
+    return this.sendCommand("tasks/list");
+  }
+
+  public runTask(
+    task_id: string,
+    options: { showBackgroundTaskToast?: boolean } = {},
+  ): Promise<BackgroundTask> {
+    return this.sendCommand<BackgroundTask>("tasks/run", { task_id }).then(
+      (task) => {
+        if (options.showBackgroundTaskToast !== false) {
+          this._notifyBackgroundTaskStarted(task);
+        }
+        return task;
+      },
+    );
+  }
+
+  public setTaskEnabled(
+    task_id: string,
+    enabled: boolean,
+  ): Promise<BackgroundTask> {
+    return this.sendCommand("tasks/set_enabled", { task_id, enabled });
+  }
+
+  public updateTaskSchedule(
+    task_id: string,
+    params: {
+      schedule: TaskSchedule;
+    },
+  ): Promise<BackgroundTask> {
+    return this.sendCommand("tasks/update_schedule", {
+      task_id,
+      ...params,
+    });
+  }
+
+  public retryTask(
+    task_id: string,
+    options: { showBackgroundTaskToast?: boolean } = {},
+  ): Promise<BackgroundTask> {
+    return this.sendCommand<BackgroundTask>("tasks/retry", { task_id }).then(
+      (task) => {
+        if (options.showBackgroundTaskToast !== false) {
+          this._notifyBackgroundTaskStarted(task);
+        }
+        return task;
+      },
+    );
+  }
+
+  public cancelTask(task_id: string): Promise<BackgroundTask> {
+    return this.sendCommand("tasks/cancel", { task_id });
+  }
+
+  public removeTask(task_id: string): Promise<void> {
+    return this.sendCommand("tasks/remove", { task_id });
+  }
+
+  public clearFinishedTasks(): Promise<void> {
+    return this.sendCommand("tasks/clear_finished");
+  }
+
+  public getTaskLog(task_id: string): Promise<string> {
+    return this.sendCommand("tasks/log", { task_id });
+  }
+
+  private _notifyBackgroundTaskStarted(
+    taskOrTasks: BackgroundTask | BackgroundTask[],
+  ): void {
+    const tasks = Array.isArray(taskOrTasks) ? taskOrTasks : [taskOrTasks];
+    if (tasks.length === 0) {
+      return;
+    }
+
+    // Imported dynamically for the same reason as the router below: auth.ts
+    // imports this module statically.
+    void import("../auth")
+      // the task list takes system.read
+      .then(({ authManager }) => authManager.hasScope(Scope.SYSTEM_READ))
+      // a chunk gone after a server update only costs the toast its action
+      .catch(() => false)
+      .then((mayOpenTasks) => {
+        toast.info($t("background_tasks.toast.added"), {
+          action: mayOpenTasks
+            ? {
+                label: $t("background_tasks.open"),
+                onClick: () => {
+                  void this._openBackgroundTasks();
+                },
+              }
+            : undefined,
+        });
+      });
+  }
+
+  private async _openBackgroundTasks(): Promise<void> {
+    // Imported dynamically: router.ts imports this module statically, so a
+    // static import here would make the api client and the router directly circular.
+    const { default: router } = await import("../router");
+    if (router.currentRoute.value.name === "backgroundtasks") {
+      return;
+    }
+    await router.push({ name: "backgroundtasks" });
+  }
+
+  /**
+   * Resolve a provider domain or instance id to a display name.
+   *
+   * Prefers the name of a loaded instance, then the manifest name, and finally
+   * the generic manifest name for the domain. Falls back to the given id when
+   * nothing matches. It never reads a provider's saved configuration, so an
+   * instance that is not loaded shows the generic service name.
+   * @param provider_domain_or_instance_id - A provider domain or instance id, e.g. from a media item or provider mapping.
+   */
+  public getProviderName(provider_domain_or_instance_id: string): string {
+    // prefer the user configured name
+    if (provider_domain_or_instance_id in this.providers) {
+      return this.providers[provider_domain_or_instance_id].name;
+    }
+    // fallback to manifest name
+    if (provider_domain_or_instance_id in this.providerManifests) {
+      return this.providerManifests[provider_domain_or_instance_id].name;
+    }
+    // instance not loaded (e.g. a source not shared with this user): fall back
+    // to the generic name of the provider the instance id belongs to
+    const domain = resolveProviderDomain(provider_domain_or_instance_id, this);
+    return domain
+      ? this.providerManifests[domain].name
+      : provider_domain_or_instance_id;
+  }
+
+  public getProvider(
+    provider_domain_or_instance_id: string,
+  ): ProviderInstance | undefined {
+    // try to get the provider from the instance_id or domain
+    if (provider_domain_or_instance_id in this.providers) {
+      return this.providers[provider_domain_or_instance_id];
+    }
+    for (const provId in this.providers) {
+      const prov = this.providers[provId];
+      if (prov.domain == provider_domain_or_instance_id) {
+        return prov;
+      }
+    }
+    return undefined;
+  }
+
+  public getProviderManifest(
+    provider_domain_or_instance_id: string,
+  ): ProviderManifest | undefined {
+    // try to get the provider manifest from the instance_id or domain
+    if (provider_domain_or_instance_id in this.providerManifests) {
+      return this.providerManifests[provider_domain_or_instance_id];
+    }
+    if (provider_domain_or_instance_id in this.providers) {
+      const prov = this.providers[provider_domain_or_instance_id];
+      return this.providerManifests[prov.domain];
+    }
+    return undefined;
+  }
+
+  public async getProviderIcon(
+    domain: string,
+    variant: ProviderIconVariant,
+  ): Promise<string | null> {
+    const key = `${domain}:${variant}`;
+    if (key in this.providerIcons) return this.providerIcons[key];
+    let request = this._providerIconRequests.get(key);
+    if (!request) {
+      request = this.sendCommand<string | null>("providers/icon", {
+        provider: domain,
+        variant,
+      })
+        .then((dataUri) => {
+          this.providerIcons[key] = dataUri ?? null;
+          return this.providerIcons[key];
+        })
+        .finally(() => {
+          this._providerIconRequests.delete(key);
+        });
+      this._providerIconRequests.set(key, request);
+    }
+    return request;
+  }
+
+  private handleEventMessage(msg: EventMessage) {
+    // Handle incoming MA event message
+    if (msg.event == EventType.QUEUE_ADDED) {
+      const queue = msg.data as PlayerQueue;
+      this.queues[queue.queue_id] = queue;
+      this.queueElapsedTime[queue.queue_id] = {
+        elapsed_time: queue.elapsed_time,
+        elapsed_time_last_updated: queue.elapsed_time_last_updated,
+      };
+    } else if (msg.event == EventType.QUEUE_UPDATED) {
+      const queue = msg.data as PlayerQueue;
+      if (queue.queue_id in this.queues)
+        Object.assign(this.queues[queue.queue_id], queue);
+      else this.queues[queue.queue_id] = queue;
+      this.queueElapsedTime[queue.queue_id] = {
+        elapsed_time: queue.elapsed_time,
+        elapsed_time_last_updated: queue.elapsed_time_last_updated,
+      };
+    } else if (msg.event == EventType.QUEUE_TIME_UPDATED) {
+      const queueId = msg.object_id as string;
+      if (queueId in this.queues) {
+        // this event carries the elapsed time without a timestamp, so it is anchored
+        // here on arrival; in server time, to stay comparable with the timestamps that
+        // full queue updates carry.
+        const now = serverNow();
+        const elapsed = msg.data as unknown as number;
+        if (queueId in this.queueElapsedTime) {
+          this.queueElapsedTime[queueId].elapsed_time = elapsed;
+          this.queueElapsedTime[queueId].elapsed_time_last_updated = now;
+        } else {
+          this.queueElapsedTime[queueId] = {
+            elapsed_time: elapsed,
+            elapsed_time_last_updated: now,
+          };
+        }
+      }
+    } else if (msg.event == EventType.PLAYER_ADDED) {
+      const player = msg.data as Player;
+      this.players[player.player_id] = player;
+    } else if (msg.event == EventType.PLAYER_UPDATED) {
+      const player = msg.data as Player;
+      if (player.player_id in this.players)
+        Object.assign(this.players[player.player_id], player);
+      else this.players[player.player_id] = player;
+    } else if (msg.event == EventType.PLAYER_REMOVED) {
+      delete this.players[msg.object_id!];
+      delete this.queues[msg.object_id!];
+      delete this.queueElapsedTime[msg.object_id!];
+    } else if (msg.event == EventType.CORE_STATE_UPDATED) {
+      // Update serverInfo with the new server state
+      this.serverInfo.value = msg.data as ServerInfoMessage;
+    } else if (msg.event == EventType.PROVIDERS_UPDATED) {
+      // Clear and repopulate the existing reactive object to preserve reactivity
+      Object.keys(this.providers).forEach((key) => delete this.providers[key]);
+      for (const prov of msg.data as ProviderInstance[]) {
+        this.providers[prov.instance_id] = prov;
+      }
+    }
+    // signal + log all events
+    if (DEBUG) console.log("[event]", msg);
+    this.signalEvent(msg);
+  }
+
+  private handleTransportStateChange(state: string): void {
+    console.log("[API] Transport state changed to:", state);
+    this.transportState.value = state;
+
+    // the socket is already gone here, so nothing in flight can be answered
+    if (
+      state === "reconnecting" ||
+      state === "failed" ||
+      state === "disconnected"
+    ) {
+      this._failPendingCommands();
+    }
+
+    if (state === "reconnecting") {
+      // Transport is attempting to reconnect
+      this.state.value = ConnectionState.RECONNECTING;
+      // pause probing but keep the estimate: clock offsets don't change while the
+      // connection is down, and a slightly stale offset still beats no correction.
+      // A new ServerInfo message resumes it once the connection is back.
+      stopServerTimeSync();
+      this.signalEvent({
+        event: EventType.DISCONNECTED,
+        object_id: "",
+      });
+    } else if (state === "failed") {
+      // Failed could be transient (during reconnect) or permanent
+      // Wait to see if it transitions to reconnecting or stays failed
+      setTimeout(() => {
+        if (this.transportState.value === "failed") {
+          // Still failed after brief wait - this is permanent failure
+          this.state.value = ConnectionState.FAILED;
+          stopServerTimeSync();
+          this.signalEvent({
+            event: EventType.DISCONNECTED,
+            object_id: "",
+          });
+        }
+        // Otherwise it transitioned to reconnecting - ignore this transient failure
+      }, 50);
+    } else if (state === "disconnected") {
+      // Check if this is an intentional disconnect (not followed by reconnecting)
+      // Use nextTick to allow reconnecting state to be set first
+      setTimeout(() => {
+        if (this.transportState.value === "disconnected") {
+          this.state.value = ConnectionState.DISCONNECTED;
+          stopServerTimeSync();
+          this.signalEvent({
+            event: EventType.DISCONNECTED,
+            object_id: "",
+          });
+        }
+      }, 0);
+    }
+  }
+
+  private handleResultMessage(msg: SuccessResultMessage | ErrorResultMessage) {
+    // Handle result of a command
+    const resultPromise = this.commands.get(msg.message_id);
+
+    if ("error_code" in msg) {
+      // always handle error (as we may be missing a resolve promise for this command)
+      msg = msg as ErrorResultMessage;
+      if (this.isGlobalErrorSuppressed(resultPromise?.suppressGlobalError)) {
+        // The caller opted out of global error handling (expected/best-effort
+        // failure); it still receives the rejection below.
+        console.debug("[resultMessage]", msg);
+      } else {
+        console.error("[resultMessage]", msg);
+
+        // Don't show toast for authentication errors - they're handled by the login UI
+        const errorMsg = msg.details || "";
+        const isAuthError =
+          errorMsg.includes("Invalid credentials") ||
+          errorMsg.includes("Invalid username") ||
+          errorMsg.includes("Invalid password") ||
+          errorMsg.includes("Authentication failed") ||
+          errorMsg.includes("Authentication required") ||
+          errorMsg.toLowerCase().includes("unauthorized");
+
+        if (!isAuthError) {
+          toast.error(msg.details || String(msg.error_code));
+        }
+      }
+    } else if (DEBUG) {
+      console.log("[resultMessage]", msg);
+    }
+
+    if (!resultPromise) return;
+
+    if ("partial" in msg && msg.partial) {
+      // handle partial results (for large listings that are split in multiple messages)
+      if (!(msg.message_id in this.partialResult)) {
+        this.partialResult[msg.message_id] = [];
+      }
+      this.partialResult[msg.message_id].push(...(msg.result as unknown[]));
+      return;
+    } else if (msg.message_id in this.partialResult) {
+      // if we have partial results, append them to the final result
+      if ("result" in msg)
+        msg.result = this.partialResult[msg.message_id].concat(
+          msg.result as unknown[],
+        );
+      delete this.partialResult[msg.message_id];
+    }
+
+    this.commands.delete(msg.message_id);
+    if ("error_code" in msg) {
+      resultPromise.reject(
+        new ApiCommandError(
+          msg.details || String(msg.error_code),
+          msg.error_code,
+          msg.details || undefined,
+        ),
+      );
+    } else {
+      msg = msg as SuccessResultMessage;
+      resultPromise.resolve(msg.result);
+    }
+  }
+
+  private handleServerInfoMessage(msg: ServerInfoMessage) {
+    // Handle ServerInfo message which is sent as first message on connect
+    if (DEBUG) {
+      console.log("[serverInfo]", msg);
+    }
+
+    this.serverInfo.value = msg;
+    // ServerInfo means transport is connected and server is ready, but not yet authenticated
+    this.state.value = ConnectionState.CONNECTED;
+    // declare our UI locale so the server localizes server-provided strings (config labels,
+    // media/folder names, provider descriptions). Handled server-side before the auth gate,
+    // so it also works on the Ingress path where the frontend skips the auth command.
+    // best-effort, fire-and-forget: a transport failure here shouldn't break the connect flow
+    void this.setLocale(i18n.global.locale.value).catch(() => undefined);
+    // (re)estimate the offset between the server clock and this device's clock, so
+    // server timestamps render correctly even when one of the two clocks is unsynced.
+    // The command needs no authentication, so this also covers the pre-auth phase.
+    startServerTimeSync(() => this.getServerTime());
+    this.signalEvent({
+      event: EventType.CONNECTED,
+      object_id: "",
+      data: msg,
+    });
+  }
+
+  /**
+   * Read the server's clock (UTC timestamp in seconds).
+   *
+   * Prefer `serverNow()` from `useServerTime`, which keeps a corrected local estimate;
+   * this command is the probe that estimate is built from.
+   */
+  public async getServerTime(): Promise<number> {
+    return await this.sendCommand<number>("time", undefined, {
+      suppressGlobalError: true,
+    });
+  }
+
+  /** Whether the connected server is too old for this frontend and needs an update. */
+  public get serverOutdated(): boolean {
+    const schemaVersion = this.serverInfo.value?.schema_version;
+    return (
+      schemaVersion !== undefined && schemaVersion < MIN_SERVER_SCHEMA_VERSION
+    );
+  }
+
+  /**
+   * Declare the connection's UI locale to the server (translations/set_locale).
+   *
+   * The server resolves server-provided strings for this locale at serialization.
+   */
+  public async setLocale(locale: string): Promise<void> {
+    if (!locale || locale === "auto") return;
+    await this.sendCommand("translations/set_locale", { locale });
+  }
+
+  /**
+   * Signal an event to all registered listeners.
+   */
+  public signalEvent(evt: MassEvent) {
+    // signal event to all listeners
+    for (const listener of this.eventCallbacks) {
+      if (listener[0] === EventType.ALL || listener[0] === evt.event) {
+        if (listener[1] == "*" || listener[1] === evt.object_id) {
+          listener[2](evt);
+        }
+      }
+    }
+  }
+
+  // Auth related functions/commands
+
+  public async changePassword(newPassword: string): Promise<boolean> {
+    // Change password for current user using unified update command
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean; user?: User } | boolean | null | undefined
+      >("auth/user/update", {
+        password: newPassword,
+      });
+
+      if (typeof result === "boolean") {
+        return result;
+      }
+
+      if (
+        result == null ||
+        (typeof result === "object" && Object.keys(result).length === 0)
+      ) {
+        return true;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        return false;
+      }
+
+      if (
+        typeof result === "object" &&
+        (("success" in result && result.success === true) || "user" in result)
+      ) {
+        return true;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error changing password:", error);
+      return false;
+    }
+  }
+
+  public async getCurrentUserInfo(): Promise<User | null> {
+    // Get current authenticated user information
+    try {
+      const result = await this.sendCommand<User>("auth/me");
+      return result;
+    } catch (error) {
+      console.error("Failed to get current user info:", error);
+      return null;
+    }
+  }
+
+  public async getUserTokens(userId?: string): Promise<AuthToken[]> {
+    // Get all tokens for current user or specific user (admin only)
+    const args = userId ? { user_id: userId } : undefined;
+    const tokens = await this.sendCommand<AuthToken[]>("auth/tokens", args);
+    return tokens || [];
+  }
+
+  public async createToken(name: string, userId?: string): Promise<string> {
+    // Create a new long-lived token for current user or specific user (admin only)
+    const args: { name: string; user_id?: string } = { name };
+    if (userId) args.user_id = userId;
+    const result = await this.sendCommand<
+      { success?: boolean; token: string } | string
+    >("auth/token/create", args);
+
+    if (typeof result === "string") {
+      return result;
+    }
+
+    if (result.success === false) {
+      throw new Error("Failed to create token");
+    }
+
+    if (!result.token) {
+      throw new Error("Failed to create token");
+    }
+
+    return result.token;
+  }
+
+  public async revokeToken(tokenId: string): Promise<boolean> {
+    // Revoke a token
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean } | boolean | null | undefined
+      >("auth/token/revoke", {
+        token_id: tokenId,
+      });
+
+      if (typeof result === "boolean") {
+        return result;
+      }
+
+      if (
+        result == null ||
+        (typeof result === "object" && Object.keys(result).length === 0)
+      ) {
+        return true;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        return false;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === true
+      ) {
+        return true;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error revoking token:", error);
+      return false;
+    }
+  }
+
+  public async getAuthProviders(): Promise<AuthProvider[]> {
+    // Get list of available authentication providers
+    return await this.sendCommand<AuthProvider[]>("auth/providers");
+  }
+
+  public async logout(): Promise<boolean> {
+    // Logout current user by revoking the current token
+    const result = await this.sendCommand<{ success: boolean }>("auth/logout");
+    return result.success;
+  }
+
+  // User management functions/commands (admin only)
+
+  public async getAllUsers(): Promise<User[]> {
+    // Get all users (admin only)
+    const users = await this.sendCommand<User[]>("auth/users");
+    return users;
+  }
+
+  public getRoles(options?: CommandOptions): Promise<Role[]> {
+    // Get all user roles: the builtin roles first, then the custom roles by name
+    return this.sendCommand<Role[]>("auth/roles", undefined, options);
+  }
+
+  public createRole(name: string, scopes: string[]): Promise<Role> {
+    // Create a custom user role (admin only)
+    return this.sendCommand(
+      "auth/role/create",
+      { name, scopes },
+      // callers show the reason the server gives; avoid a duplicate global toast
+      { suppressGlobalError: true },
+    );
+  }
+
+  public updateRole(
+    roleId: string,
+    updates: { name?: string; scopes?: string[] },
+  ): Promise<Role> {
+    // Change the name and/or the scopes of a custom user role (admin only)
+    return this.sendCommand(
+      "auth/role/update",
+      { role_id: roleId, ...updates },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public deleteRole(roleId: string): Promise<void> {
+    // Delete a custom user role that no user holds (admin only)
+    return this.sendCommand(
+      "auth/role/delete",
+      { role_id: roleId },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public async createUser(
+    username: string,
+    password: string,
+    role: string,
+    displayName?: string,
+    playerFilter?: string[],
+    options?: CommandOptions,
+  ): Promise<User> {
+    // Create a new user (admin only)
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean; user?: User } | User | null | undefined
+      >(
+        "auth/user/create",
+        {
+          username,
+          password,
+          role,
+          display_name: displayName,
+          player_filter: playerFilter,
+        },
+        options,
+      );
+
+      if (result == null) {
+        throw new Error("Failed to create user");
+      }
+
+      if (typeof result === "object" && "user_id" in result) {
+        return result as User;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        throw new Error("Failed to create user");
+      }
+
+      if (typeof result === "object" && "user" in result && result.user) {
+        return result.user;
+      }
+
+      if (typeof result === "object" && "user_id" in result) {
+        return result as User;
+      }
+
+      throw new Error("Failed to create user");
+    } catch (error) {
+      console.error("Error creating user:", error);
+      throw error;
+    }
+  }
+
+  public async updateUser(
+    userId: string,
+    updates: {
+      username?: string;
+      displayName?: string;
+      avatarUrl?: string;
+      role?: string;
+      password?: string;
+      preferences?: Record<string, unknown>;
+      player_filter?: string[];
+    },
+    options?: CommandOptions,
+  ): Promise<User> {
+    // Update user using unified update command
+    try {
+      const args: Record<string, unknown> = { user_id: userId };
+
+      if (updates.username) args.username = updates.username;
+      if (updates.displayName) args.display_name = updates.displayName;
+      if (updates.avatarUrl) args.avatar_url = updates.avatarUrl;
+      if (updates.role) args.role = updates.role;
+      if (updates.password) args.password = updates.password;
+      if (updates.preferences != undefined)
+        args.preferences = updates.preferences;
+      if (updates.player_filter != undefined)
+        args.player_filter = updates.player_filter;
+
+      const result = await this.sendCommand<
+        { success?: boolean; user?: User } | User | null | undefined
+      >("auth/user/update", args, options);
+
+      if (result == null) {
+        throw new Error("Failed to update user");
+      }
+
+      if (typeof result === "object" && "user_id" in result) {
+        return result as User;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        throw new Error("Failed to update user");
+      }
+
+      if (typeof result === "object" && "user" in result && result.user) {
+        return result.user;
+      }
+
+      if (typeof result === "object" && "user_id" in result) {
+        return result as User;
+      }
+
+      throw new Error("Failed to update user");
+    } catch (error) {
+      console.error("Error updating user:", error);
+      throw error;
+    }
+  }
+
+  public async enableUser(userId: string): Promise<boolean> {
+    // Enable user (admin only)
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean } | boolean | null | undefined
+      >("auth/user/enable", {
+        user_id: userId,
+      });
+
+      if (typeof result === "boolean") {
+        return result;
+      }
+
+      if (
+        result == null ||
+        (typeof result === "object" && Object.keys(result).length === 0)
+      ) {
+        return true;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error enabling user:", error);
+      return false;
+    }
+  }
+
+  public async deleteUser(userId: string): Promise<boolean> {
+    // Delete user (admin only)
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean } | boolean | null | undefined
+      >("auth/user/delete", {
+        user_id: userId,
+      });
+
+      if (typeof result === "boolean") {
+        return result;
+      }
+
+      if (
+        result == null ||
+        (typeof result === "object" && Object.keys(result).length === 0)
+      ) {
+        return true;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error deleting user:", error);
+      return false;
+    }
+  }
+
+  public async disableUser(userId: string): Promise<boolean> {
+    // Disable user (admin only)
+    try {
+      const result = await this.sendCommand<
+        { success?: boolean } | boolean | null | undefined
+      >("auth/user/disable", {
+        user_id: userId,
+      });
+
+      if (typeof result === "boolean") {
+        return result;
+      }
+
+      if (
+        result == null ||
+        (typeof result === "object" && Object.keys(result).length === 0)
+      ) {
+        return true;
+      }
+
+      if (
+        typeof result === "object" &&
+        "success" in result &&
+        result.success === false
+      ) {
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error disabling user:", error);
+      return false;
+    }
+  }
+
+  // Remote Access methods
+
+  public async getRemoteAccessInfo(): Promise<RemoteAccessInfo> {
+    // Get remote access information
+    return this.sendCommand<RemoteAccessInfo>("remote_access/info");
+  }
+
+  public async configureRemoteAccess(
+    enabled: boolean,
+  ): Promise<RemoteAccessInfo> {
+    // Configure remote access (admin only)
+    return this.sendCommand<RemoteAccessInfo>("remote_access/configure", {
+      enabled,
+    });
+  }
+
+  // Stream server methods
+
+  public async getStreamServerInfo(
+    options?: CommandOptions,
+  ): Promise<StreamServerInfo> {
+    // Get the address the stream server hands to players
+    return this.sendCommand<StreamServerInfo>(
+      "streams/info",
+      undefined,
+      options,
+    );
+  }
+
+  // Storage methods
+  // Every caller reports a failure itself (a toast or inline in its dialog) or does
+  // without what failed, so the storage commands skip the global error toast.
+
+  public getStorageInfo(): Promise<StorageInfo> {
+    // Get the storage locations the caller may see and what this install can mount
+    return this.sendCommand<StorageInfo>("storage/info", undefined, {
+      suppressGlobalError: true,
+    });
+  }
+
+  public getSourceFolder(instance_id: string): Promise<SourceFolder> {
+    // Get the folder a Local files source reads from and the storage location holding it
+    return this.sendCommand<SourceFolder>(
+      "storage/source_folder",
+      { instance_id },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public getStorageFolders(path: string): Promise<string[]> {
+    // Get the names of the subfolders of a media location, or of a folder inside one
+    return this.sendCommand<string[]>(
+      "storage/folders",
+      { path },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public addNetworkShare(
+    share_type: ShareType,
+    settings: NetworkShareSettings,
+  ): Promise<StorageLocation> {
+    // Mount a network share as a new media location
+    return this.sendCommand<StorageLocation>(
+      "storage/network_shares/add",
+      { share_type, ...settings },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public updateNetworkShare(
+    name: string,
+    settings: NetworkShareSettings,
+  ): Promise<StorageLocation> {
+    // Replace the settings of a network share; an omitted password keeps the stored one
+    return this.sendCommand<StorageLocation>(
+      "storage/network_shares/update",
+      { name, ...settings },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public removeNetworkShare(name: string): Promise<void> {
+    // Unmount and forget a network share; refused while a music source uses it
+    return this.sendCommand(
+      "storage/network_shares/remove",
+      { name },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public reloadNetworkShare(name: string): Promise<StorageLocation> {
+    // Mount a network share again
+    return this.sendCommand<StorageLocation>(
+      "storage/network_shares/reload",
+      { name },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public addLocalFolder(path: string): Promise<StorageLocation> {
+    // Register a folder on the server itself as a media location
+    return this.sendCommand<StorageLocation>(
+      "storage/local_folders/add",
+      { path },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public removeLocalFolder(path: string): Promise<void> {
+    // Forget a registered folder; refused while a music source uses it
+    return this.sendCommand(
+      "storage/local_folders/remove",
+      { path },
+      { suppressGlobalError: true },
+    );
+  }
+
+  public sendCommand<Result>(
+    command: string,
+    args?: Record<string, unknown>,
+    options?: CommandOptions,
+  ): Promise<Result> {
+    // send command to the server and return promise where the result can be returned
+    const cmdId = this._genCmdId();
+    return new Promise((resolve, reject) => {
+      this.commands.set(cmdId, {
+        resolve: resolve as (result: unknown) => void,
+        reject,
+        suppressGlobalError: options?.suppressGlobalError,
+      });
+      try {
+        this._sendCommand(command, args, cmdId);
+      } catch (error) {
+        // a synchronous throw here rejects the promise but leaves the map entry behind
+        this.commands.delete(cmdId);
+        throw error;
+      }
+    });
+  }
+
+  private _sendCommand(
+    command: string,
+    args?: Record<string, unknown>,
+    msgId?: string,
+  ): void {
+    // Allow commands only when fully connected
+    if (
+      this.state.value !== ConnectionState.CONNECTED &&
+      this.state.value !== ConnectionState.AUTH_REQUIRED &&
+      this.state.value !== ConnectionState.AUTHENTICATING &&
+      this.state.value !== ConnectionState.AUTHENTICATED &&
+      this.state.value !== ConnectionState.INITIALIZED
+    ) {
+      throw new ConnectionLostError();
+    }
+
+    if (!msgId) {
+      msgId = this._genCmdId();
+    }
+
+    const msg: CommandMessage = {
+      command: command,
+      message_id: msgId.toString(),
+      args,
+    };
+
+    if (DEBUG) {
+      console.log("[sendCommand]", msg);
+    }
+
+    const msgStr = JSON.stringify(msg);
+
+    if (!this.transport) {
+      throw new ConnectionLostError();
+    }
+
+    try {
+      this.transport.send(msgStr);
+    } catch {
+      // transport throws untyped errors; callers filter on ConnectionLostError
+      throw new ConnectionLostError();
+    }
+  }
+
+  public async fetchState() {
+    // fetch full initial state
+    // a (re)connect is the moment to pick up config changes made elsewhere
+    this._coreConfigValues.clear();
+    for (const player of await this.getPlayers()) {
+      this.players[player.player_id] = player;
+    }
+    for (const queue of await this.getPlayerQueues()) {
+      this.queues[queue.queue_id] = queue;
+      this.queueElapsedTime[queue.queue_id] = {
+        elapsed_time: queue.elapsed_time,
+        elapsed_time_last_updated: queue.elapsed_time_last_updated,
+      };
+    }
+
+    for (const prov of await this.sendCommand<ProviderManifest[]>(
+      "providers/manifests",
+    )) {
+      this.providerManifests[prov.domain] = prov;
+    }
+
+    await this.fetchProviders();
+  }
+
+  public async fetchProviders() {
+    const providers = await this.sendCommand<ProviderInstance[]>("providers");
+    Object.keys(this.providers).forEach((key) => delete this.providers[key]);
+    for (const provider of providers) {
+      this.providers[provider.instance_id] = provider;
+    }
+  }
+
+  /** Reject commands still awaiting a reply; a dropped socket can never answer them. */
+  private _failPendingCommands(): void {
+    if (this.commands.size === 0) {
+      this.partialResult = {};
+      return;
+    }
+    // clear first: a rejection handler may immediately send a new command
+    const pending = [...this.commands.values()];
+    this.commands.clear();
+    this.partialResult = {};
+    for (const command of pending) {
+      command.reject(new ConnectionLostError());
+    }
+  }
+
+  /**
+   * Whether an error result skips the global console.error + error toast.
+   *
+   * A caller's predicate must never take down the message pump or the command
+   * still waiting on this reply, so one that throws falls back to showing the
+   * failure.
+   */
+  private isGlobalErrorSuppressed(
+    suppress: CommandOptions["suppressGlobalError"],
+  ): boolean {
+    if (typeof suppress !== "function") return !!suppress;
+    try {
+      return suppress();
+    } catch (err) {
+      console.error("[resultMessage] suppression check failed", err);
+      return false;
+    }
+  }
+
+  /**
+   * Whether a player has since moved on from the source a command named.
+   *
+   * Identifies the server's refusal of a command aimed at a source that stopped
+   * playing. The player is moved on before the command is handled, and both
+   * messages share one ordered queue, so the state update has always landed by
+   * the time the refusal comes back.
+   */
+  private hasMovedOnFrom(playerId: string, sourceId: string): boolean {
+    const player = this.players[playerId];
+    return !!player && resolveActiveSourceId(player) !== sourceId;
+  }
+
+  private _genCmdId(): string {
+    // Generate a cryptographically secure UUID
+    // Use crypto.randomUUID when available (secure contexts only)
+    // Otherwise fall back to a UUID v4 implementation using crypto.getRandomValues
+    if (crypto.randomUUID) {
+      return crypto.randomUUID();
+    }
+
+    // Fallback UUID v4 generator using crypto.getRandomValues (works in all contexts)
+    return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => {
+      const num = parseInt(c, 10);
+      return (
+        num ^
+        (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (num / 4)))
+      ).toString(16);
+    });
+  }
+
+  /**
+   * Open a DataChannel through the remote access WebRTC connection.
+   * Returns null if not in remote mode or if WebRTC transport doesn't support it.
+   *
+   * @param label - Channel label the server routes on, e.g. "sendspin".
+   */
+  public async openDataChannel(label: string): Promise<RTCDataChannel | null> {
+    if (!this.transport) {
+      return null;
+    }
+
+    // Check if transport supports creating additional channels
+    if (typeof this.transport.openDataChannel === "function") {
+      try {
+        return await this.transport.openDataChannel(label);
+      } catch (error) {
+        console.error(`[API] Failed to create ${label} DataChannel:`, error);
+        return null;
+      }
+    }
+
+    return null;
+  }
+}
+
+export const api = new MusicAssistantApi();
+export default api;
